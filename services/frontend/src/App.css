@@ -1,0 +1,105 @@
+.app-header {
+  background: #fff;
+  padding: 0 24px;
+  box-shadow: 0 2px 8px #f0f1f2;
+}
+
+.logo {
+  float: left;
+  width: 200px;
+  height: 31px;
+  margin: 16px 24px 16px 0;
+  font-size: 18px;
+  font-weight: bold;
+  color: #1890ff;
+}
+
+.service-card {
+  margin-bottom: 16px;
+}
+
+.service-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-healthy {
+  background-color: #52c41a;
+}
+
+.status-unhealthy {
+  background-color: #ff4d4f;
+}
+
+.status-loading {
+  background-color: #faad14;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.metric-card {
+  padding: 16px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.metric-value {
+  font-size: 24px;
+  font-weight: bold;
+  color: #1890ff;
+  margin-bottom: 8px;
+}
+
+.metric-label {
+  color: #666;
+  font-size: 14px;
+}
+
+.service-endpoints {
+  margin-top: 16px;
+}
+
+.endpoint-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.endpoint-method {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: bold;
+  color: #fff;
+}
+
+.method-get {
+  background-color: #52c41a;
+}
+
+.method-post {
+  background-color: #1890ff;
+}
+
+.method-put {
+  background-color: #faad14;
+}
+
+.method-delete {
+  background-color: #ff4d4f;
+}

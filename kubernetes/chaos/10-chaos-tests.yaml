@@ -1,0 +1,24 @@
+# Chaos Engineering Tests
+# Note: These are example chaos tests. In production, you would use Chaos Mesh or Litmus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-scenarios
+  namespace: production
+data:
+  pod-failure.yaml: |
+    # Simulate pod failures to test recovery
+    # kubectl delete pod $(kubectl get pods -n production -l app=api-service -o jsonpath='{.items[0].metadata.name}') -n production
+  
+  network-partition.yaml: |
+    # Simulate network partitions
+    # Use network policies to temporarily block traffic
+    
+  resource-exhaustion.yaml: |
+    # Test resource limits and HPA behavior
+    # Generate load to trigger HPA scaling
+    
+  certificate-renewal.yaml: |
+    # Test TLS certificate renewal
+    # Simulate cert-manager certificate rotation

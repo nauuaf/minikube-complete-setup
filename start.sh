@@ -1,0 +1,326 @@
+#!/bin/bash
+set -euo pipefail
+
+# SRE Assignment Deployment Script - Ubuntu/Linux Edition
+# Optimized for Ubuntu 20.04+ and similar Linux distributions
+# Features: Private Docker Registry, Microservices, Monitoring, TLS
+
+# Load configuration
+source config/config.env
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Error handling
+trap 'echo -e "${RED}Error occurred at line $LINENO${NC}"; exit 1' ERR
+
+# Functions
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+health_check() {
+    local service=$1
+    local namespace=${2:-default}
+    local max_attempts=60
+    local attempt=0
+    
+    log_info "Waiting for $service to be ready..."
+    
+    # Wait for pods to be running and ready using kubectl wait
+    if kubectl wait --for=condition=ready pod -l app=$service -n $namespace --timeout=120s 2>/dev/null; then
+        local pod_count=$(kubectl get pods -n $namespace -l app=$service --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        log_success "$service is ready ($pod_count pod(s) running)"
+        return 0
+    fi
+    
+    # Fallback to manual checking if kubectl wait fails
+    log_info "kubectl wait failed, trying manual check..."
+    
+    # Check for stuck pods and restart them if needed
+    local stuck_pods=$(kubectl get pods -n $namespace -l app=$service --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$stuck_pods" -gt 0 ]]; then
+        log_warning "Found $stuck_pods stuck pod(s) for $service, restarting them..."
+        kubectl delete pods -n $namespace -l app=$service --field-selector=status.phase=Pending
+        sleep 10
+    fi
+    
+    while [ $attempt -lt $max_attempts ]; do
+        # Check for pods stuck in ContainerCreating for too long (>3 minutes)
+        if [ $attempt -gt 30 ]; then
+            local creating_pods=$(kubectl get pods -n $namespace -l app=$service | grep ContainerCreating | wc -l | tr -d ' ')
+            if [[ "$creating_pods" -gt 0 ]]; then
+                log_warning "Restarting pods stuck in ContainerCreating status..."
+                kubectl delete pods -n $namespace -l app=$service --field-selector=status.phase=Pending
+                sleep 10
+            fi
+        fi
+        
+        # Simple check - just see if pods are running
+        local running_pods=$(kubectl get pods -n $namespace -l app=$service --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        local total_pods=$(kubectl get pods -n $namespace -l app=$service --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        
+        if [[ "$running_pods" -gt 0 ]] && [[ "$running_pods" -eq "$total_pods" ]]; then
+            log_success "$service is ready ($running_pods/$total_pods pods)"
+            return 0
+        fi
+        
+        # Show progress every 10 attempts
+        if [ $((attempt % 10)) -eq 0 ]; then
+            log_info "⏳ $service: $running_pods/$total_pods pods running (attempt $attempt/$max_attempts)"
+        fi
+        
+        echo -n "."
+        sleep 2
+        ((attempt++))
+    done
+    
+    log_error "$service failed to start after $max_attempts attempts"
+    kubectl get pods -n $namespace -l app=$service 2>/dev/null || true
+    kubectl describe pods -n $namespace -l app=$service 2>/dev/null || true
+    return 1
+}
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}   SRE Assignment - Ubuntu/Linux${NC}"
+echo -e "${GREEN}   Kubernetes Platform Deployment${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+# Step 0: Pre-flight check
+log_info "Running pre-flight checks..."
+
+# Ensure we're in the right directory
+if [[ ! -f "config/config.env" ]]; then
+    log_error "config/config.env not found. Please run this script from the sre-assignment directory"
+    exit 1
+fi
+
+# Check if minikube is already running with conflicting state
+if minikube status >/dev/null 2>&1; then
+    log_info "Minikube is already running. Restarting for clean state..."
+    minikube stop
+    sleep 2
+fi
+
+# Step 1: Prerequisites check
+log_info "Checking prerequisites..."
+./prereq-check.sh || exit 1
+
+# Step 2: Start Minikube
+log_info "Starting Minikube cluster..."
+minikube start \
+    --memory=$MEMORY \
+    --cpus=$CPUS \
+    --disk-size=$DISK_SIZE \
+    --driver=docker \
+    --insecure-registry="10.0.0.0/8,localhost:5000"
+
+# Step 3: Enable addons
+log_info "Enabling Minikube addons..."
+minikube addons enable ingress
+minikube addons enable ingress-dns
+minikube addons enable metrics-server
+minikube addons enable dashboard
+
+# Step 4: Install cert-manager for Let's Encrypt
+log_info "Installing cert-manager for TLS..."
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+sleep 30  # Wait for cert-manager to be ready
+
+# Step 5: Create namespaces
+log_info "Creating namespaces..."
+kubectl apply -f kubernetes/core/00-namespaces.yaml
+sleep 2
+
+# Step 6: Deploy private registry with auth
+log_info "Deploying private registry..."
+./scripts/registry-auth.sh
+kubectl apply -f kubernetes/core/01-registry.yaml
+health_check "docker-registry" "default"
+
+# Get registry details
+REGISTRY_IP=$(kubectl get service docker-registry -n default -o jsonpath='{.spec.clusterIP}')
+MINIKUBE_IP=$(minikube ip)
+log_success "Registry deployed - Cluster IP: $REGISTRY_IP:5000, NodePort: $MINIKUBE_IP:$REGISTRY_PORT"
+
+# Step 7: Configure Docker to use Minikube
+eval $(minikube docker-env)
+
+# Step 8: Build images
+log_info "Building Docker images..."
+docker build -t api-service:$API_VERSION ./services/api-service &
+docker build -t auth-service:$AUTH_VERSION ./services/auth-service &
+docker build -t image-service:$IMAGE_VERSION ./services/image-service &
+docker build -t frontend:$FRONTEND_VERSION ./services/frontend &
+wait
+log_success "All images built"
+
+# Step 9: Tag and push to registry
+log_info "Pushing images to private registry..."
+
+# Wait for registry to be ready
+kubectl wait --for=condition=ready pod -l app=docker-registry --timeout=300s
+
+# Use direct NodePort access (works natively on Linux)
+MINIKUBE_IP=$(minikube ip)
+REGISTRY_URL="http://$MINIKUBE_IP:$REGISTRY_PORT"
+REGISTRY_HOST="$MINIKUBE_IP:$REGISTRY_PORT"
+
+log_info "Testing registry connection at $REGISTRY_URL..."
+# Simple connection test with retry
+retry_count=0
+while [ $retry_count -lt 30 ]; do
+    if curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/ > /dev/null 2>&1; then
+        log_success "✅ Registry accessible at: $REGISTRY_URL"
+        break
+    fi
+    log_info "Registry not ready, retrying in 2 seconds..."
+    sleep 2
+    ((retry_count++))
+done
+
+if [ $retry_count -eq 30 ]; then
+    log_error "❌ Registry connection failed after 60 seconds"
+    log_error "Please check: kubectl get pods -l app=docker-registry"
+    log_error "And: kubectl logs -l app=docker-registry"
+    exit 1
+fi
+
+# Docker login
+log_info "Logging into registry..."
+if echo $REGISTRY_PASS | docker login $REGISTRY_HOST -u $REGISTRY_USER --password-stdin 2>/dev/null; then
+    log_success "Docker login successful"
+else
+    log_error "❌ Docker login failed"
+    exit 1
+fi
+
+# Tag and push images
+log_info "Tagging images for registry..."
+docker tag api-service:$API_VERSION $REGISTRY_HOST/api-service:$API_VERSION
+docker tag auth-service:$AUTH_VERSION $REGISTRY_HOST/auth-service:$AUTH_VERSION
+docker tag image-service:$IMAGE_VERSION $REGISTRY_HOST/image-service:$IMAGE_VERSION
+docker tag frontend:$FRONTEND_VERSION $REGISTRY_HOST/frontend:$FRONTEND_VERSION
+
+log_info "Pushing images to registry..."
+docker push $REGISTRY_HOST/api-service:$API_VERSION
+docker push $REGISTRY_HOST/auth-service:$AUTH_VERSION
+docker push $REGISTRY_HOST/image-service:$IMAGE_VERSION
+docker push $REGISTRY_HOST/frontend:$FRONTEND_VERSION
+
+log_success "All images pushed to registry successfully"
+
+# Verify registry contents
+log_info "Verifying registry contents..."
+curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog | jq .
+
+# Step 10: Deploy security components
+log_info "Deploying security components..."
+kubectl apply -f kubernetes/security/02-secrets.yaml
+kubectl apply -f kubernetes/security/03-network-policies.yaml
+kubectl apply -f kubernetes/security/04-tls-ingress.yaml
+
+# Step 11: Deploy data layer (PostgreSQL, Redis, MinIO)
+log_info "Deploying data infrastructure..."
+kubectl apply -f kubernetes/data/12-postgresql.yaml
+kubectl apply -f kubernetes/data/13-redis.yaml
+kubectl apply -f kubernetes/data/14-minio.yaml
+
+# Wait for data layer to be ready
+health_check "postgres" $NAMESPACE_PROD
+health_check "redis" $NAMESPACE_PROD
+health_check "minio" $NAMESPACE_PROD
+
+log_info "Waiting for MinIO bucket initialization..."
+kubectl wait --for=condition=complete job/minio-bucket-init -n $NAMESPACE_PROD --timeout=300s
+
+# Step 12: Deploy applications
+log_info "Deploying applications..."
+
+# Update manifests with correct registry references
+./scripts/update-registry-refs.sh
+
+# Deploy applications (they will pull from registry)
+kubectl apply -f /tmp/updated-apps/
+
+health_check "api-service" $NAMESPACE_PROD
+health_check "auth-service" $NAMESPACE_PROD
+health_check "image-service" $NAMESPACE_PROD
+health_check "frontend" $NAMESPACE_PROD
+
+# Step 13: Deploy monitoring
+log_info "Deploying monitoring stack..."
+kubectl apply -f kubernetes/monitoring/08-prometheus.yaml
+kubectl apply -f kubernetes/monitoring/09-grafana.yaml
+kubectl apply -f kubernetes/monitoring/10-alertmanager.yaml
+kubectl apply -f kubernetes/monitoring/11-alert-rules.yaml
+health_check "prometheus" $NAMESPACE_MONITORING
+health_check "grafana" $NAMESPACE_MONITORING
+health_check "alertmanager" $NAMESPACE_MONITORING
+
+# Step 14: Import Grafana dashboards
+log_info "Importing Grafana dashboards..."
+sleep 10
+./scripts/import-dashboards.sh
+
+# Step 15: Run smoke tests
+log_info "Running smoke tests..."
+./scripts/health-checks.sh
+
+# Step 16: Display access information
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}✅ Setup Complete!${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+# Display access information - Linux optimized
+MINIKUBE_IP=$(minikube ip)
+
+echo -e "\n${YELLOW}📦 Private Docker Registry:${NC}"
+echo "Registry API: http://$MINIKUBE_IP:$REGISTRY_PORT"
+echo "Registry UI: http://$MINIKUBE_IP:$REGISTRY_UI_PORT"
+echo "Username: $REGISTRY_USER / Password: $REGISTRY_PASS"
+
+echo -e "\n${YELLOW}🗄️ Data Layer:${NC}"
+echo "PostgreSQL: postgres-service.production.svc.cluster.local:5432"
+echo "Redis Cache: redis-service.production.svc.cluster.local:6379"
+echo "MinIO S3 API: http://$MINIKUBE_IP:30900"
+echo "MinIO Console: http://$MINIKUBE_IP:30901"
+echo "MinIO Credentials: AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxFCYEXAMPLEKE"
+
+echo -e "\n${YELLOW}🚀 Services (NodePort Access):${NC}"
+echo "Frontend (Public): http://$MINIKUBE_IP:$FRONTEND_NODEPORT"
+echo "API Service: ClusterIP only (accessible via frontend)"
+echo "Auth Service: ClusterIP only (accessible via frontend)"  
+echo "Image Service: ClusterIP only (accessible via frontend)"
+
+echo -e "\n${YELLOW}📊 Monitoring:${NC}"
+echo "Prometheus: http://$MINIKUBE_IP:$PROMETHEUS_NODEPORT"
+echo "Grafana: http://$MINIKUBE_IP:$GRAFANA_NODEPORT"
+echo "  Username: admin / Password: $GRAFANA_ADMIN_PASSWORD"
+
+echo -e "\n${YELLOW}🌐 Ingress (with TLS):${NC}"
+INGRESS_IP=$(kubectl get ingress -n $NAMESPACE_PROD services-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+echo "Ingress IP: $INGRESS_IP"
+echo "Add to /etc/hosts: $INGRESS_IP sre-assignment.local"
+
+echo -e "\n${YELLOW}📋 Management Commands:${NC}"
+echo "1. Run tests: ./test-scenarios.sh"
+echo "2. View dashboard: minikube dashboard"
+echo "3. Check logs: kubectl logs -f <pod-name> -n production"
+echo "4. Stop everything: ./stop.sh"
+
+echo -e "\n${GREEN}🐧 Ubuntu/Linux Complete Platform:${NC}"
+echo "- ✅ Registry: Fully functional (all images pushed successfully)"
+echo "- ✅ Database: PostgreSQL with persistent storage and schemas"
+echo "- ✅ Cache: Redis with authentication and persistence"
+echo "- ✅ Storage: MinIO S3-compatible object storage"  
+echo "- ✅ Services: All microservices connected to real data layer"
+echo "- ✅ Monitoring: Full observability stack with exporters"
+echo "- ✅ Security: Network policies, secrets, TLS encryption"
+echo "- ✅ Scaling: HPA, PDB, resource limits configured"
+echo "- ✅ Access: NodePorts on $MINIKUBE_IP (sudo ufw allow 30000:32767/tcp for remote)"

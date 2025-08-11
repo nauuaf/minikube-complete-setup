@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(tree:*)",
+      "Bash(npm install)",
+      "Bash(./stop.sh)",
+      "Bash(kubectl get pods:*)",
+      "Bash(minikube:*)",
+      "Bash(chmod:*)",
+      "Bash(./start.sh:*)",
+      "Bash(pkill:*)",
+      "Bash(true)",
+      "Bash(source:*)",
+      "Bash(timeout:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(READY_PODS=1)",
+      "Bash(TOTAL_PODS=1)",
+      "Bash(echo:*)",
+      "Bash(if [[ $READY_PODS -gt 0 ]])",
+      "Bash([[ $READY_PODS -eq $TOTAL_PODS ]])",
+      "Bash(then echo \"Should return success\")",
+      "Bash(else echo \"Logic failed\")",
+      "Bash(fi)",
+      "Bash(kubectl wait:*)",
+      "Bash(./scripts/health-checks.sh:*)",
+      "Bash(curl:*)",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl rollout restart:*)",
+      "Bash(mv:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(grep:*)",
+      "Bash(rm:*)",
+      "Bash(kubectl patch:*)",
+      "Bash(./scripts/use-local-images.sh:*)"
+    ],
+    "deny": []
+  }
+}
