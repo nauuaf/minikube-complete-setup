@@ -15,7 +15,25 @@ if minikube status >/dev/null 2>&1; then
     echo "Cleaning up Kubernetes resources..."
     
     # Kill any port-forward processes
+    echo "Stopping port forwarding..."
     pkill -f "kubectl port-forward" 2>/dev/null || true
+    
+    # Stop the systemd service if it exists
+    if systemctl list-units --full -all | grep -Fq "minikube-expose.service"; then
+        echo "Stopping minikube-expose service..."
+        sudo systemctl stop minikube-expose.service 2>/dev/null || true
+        sudo systemctl disable minikube-expose.service 2>/dev/null || true
+    fi
+    
+    # Kill any minikube tunnel processes
+    pkill -f "minikube tunnel" 2>/dev/null || true
+    
+    # Kill any socat forwarding processes
+    sudo pkill -f "socat.*30004" 2>/dev/null || true
+    sudo pkill -f "socat.*30030" 2>/dev/null || true
+    sudo pkill -f "socat.*30090" 2>/dev/null || true
+    sudo pkill -f "socat.*30501" 2>/dev/null || true
+    sudo pkill -f "socat.*30901" 2>/dev/null || true
     
     # Delete in reverse order for clean shutdown
     kubectl delete -f kubernetes/apps/ 2>/dev/null || true
@@ -45,6 +63,15 @@ docker images | grep -E "(api-service|auth-service|image-service|localhost:30500
 if [[ "${1:-}" == "--delete-cluster" ]]; then
     echo "Deleting Minikube cluster..."
     minikube delete
+    
+    # Also remove the systemd service files if doing complete cleanup
+    if [ -f /etc/systemd/system/minikube-expose.service ]; then
+        echo "Removing minikube-expose service..."
+        sudo rm -f /etc/systemd/system/minikube-expose.service
+        sudo rm -f /usr/local/bin/minikube-expose.sh
+        sudo systemctl daemon-reload
+    fi
+    
     echo -e "${GREEN}✓ Minikube cluster deleted${NC}"
 else
     echo -e "${YELLOW}Tip: Use './stop.sh --delete-cluster' to also delete the minikube cluster${NC}"
