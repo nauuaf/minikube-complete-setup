@@ -571,8 +571,12 @@ pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 2
 
 # Create comprehensive port forwarding script
-cat > /tmp/complete-forward.sh << 'EOF'
+cat > /tmp/sre-platform-forward.sh << 'EOF'
 #!/bin/bash
+
+# Create log directory with proper permissions
+mkdir -p /tmp/sre-logs
+chmod 755 /tmp/sre-logs
 
 echo "Starting comprehensive port forwarding..."
 
@@ -586,17 +590,19 @@ done
 pkill -f "port-forward" 2>/dev/null || true
 sleep 2
 
-# HTTPS/HTTP for ingress (REQUIRED FOR DOMAIN ACCESS)
-kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /var/log/http.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /var/log/https.log 2>&1 &
+echo "Starting port forwards with correct service ports..."
 
-# Direct service access (NodePort alternatives)
-kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:80 > /var/log/frontend.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /var/log/grafana.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /var/log/prometheus.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n default svc/registry-ui 30501:80 > /var/log/registry-ui.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30900:9000 > /var/log/minio-api.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30901:9001 > /var/log/minio-console.log 2>&1 &
+# HTTPS/HTTP for ingress (domain access)
+kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
+
+# Direct service access (using correct service ports)
+kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:3000 > /tmp/sre-logs/frontend.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /tmp/sre-logs/grafana.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /tmp/sre-logs/prometheus.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n default svc/registry-ui 30501:80 > /tmp/sre-logs/registry-ui.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30900:9000 > /tmp/sre-logs/minio-api.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30901:9001 > /tmp/sre-logs/minio-console.log 2>&1 &
 
 echo "All port forwards started"
 
@@ -604,32 +610,34 @@ echo "All port forwards started"
 while true; do
     sleep 30
     
-    # Check critical HTTPS forwarding
+    # Check critical forwarding with proper restart
     if ! pgrep -f "port-forward.*:443" > /dev/null; then
         echo "Restarting HTTPS forward..."
-        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /var/log/https.log 2>&1 &
+        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
     fi
     
     if ! pgrep -f "port-forward.*:80" > /dev/null; then
         echo "Restarting HTTP forward..."
-        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /var/log/http.log 2>&1 &
+        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
     fi
     
-    # Check other services
     if ! pgrep -f "port-forward.*30004" > /dev/null; then
-        kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:80 > /var/log/frontend.log 2>&1 &
+        echo "Restarting frontend forward..."
+        kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:3000 > /tmp/sre-logs/frontend.log 2>&1 &
     fi
     if ! pgrep -f "port-forward.*30030" > /dev/null; then
-        kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /var/log/grafana.log 2>&1 &
+        echo "Restarting Grafana forward..."
+        kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /tmp/sre-logs/grafana.log 2>&1 &
     fi
     if ! pgrep -f "port-forward.*30090" > /dev/null; then
-        kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /var/log/prometheus.log 2>&1 &
+        echo "Restarting Prometheus forward..."
+        kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /tmp/sre-logs/prometheus.log 2>&1 &
     fi
 done
 EOF
 
 # Install as systemd service
-sudo cp /tmp/complete-forward.sh /usr/local/bin/sre-platform-forward.sh
+sudo cp /tmp/sre-platform-forward.sh /usr/local/bin/sre-platform-forward.sh
 sudo chmod +x /usr/local/bin/sre-platform-forward.sh
 
 cat > /tmp/sre-platform-forward.service << EOF
@@ -691,6 +699,11 @@ PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s http://ipinfo.io/ip 
 
 # Step 18: Display access information
 echo -e "\n${GREEN}========================================${NC}"
+# Step 19: Final verification
+log_info "Running final verification..."
+sleep 5
+./scripts/verify-access.sh
+
 echo -e "${GREEN}✅ Setup Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 
