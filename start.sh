@@ -224,36 +224,53 @@ fi
 # Restart Docker if configuration changed
 if [ "$NEEDS_RESTART" = true ]; then
     log_info "Restarting Docker daemon to apply configuration..."
-    sudo systemctl daemon-reload
-    sudo systemctl restart docker
-    sleep 5
-    # Wait for Docker to be ready
+    
+    # Reload daemon configuration
+    sudo systemctl daemon-reload || log_warning "Failed to reload systemd daemon"
+    
+    # Restart Docker with error handling
+    if sudo systemctl restart docker; then
+        log_info "Docker restart command completed"
+    else
+        log_warning "Docker restart command failed, but continuing..."
+    fi
+    
+    # Wait for Docker to be ready with more patience
+    log_info "Waiting for Docker daemon to be ready..."
     retry_count=0
-    while [ $retry_count -lt 10 ]; do
+    while [ $retry_count -lt 20 ]; do  # Increased from 10 to 20
         if docker info > /dev/null 2>&1; then
-            log_success "Docker daemon restarted successfully"
+            log_success "Docker daemon is ready"
             break
         fi
-        sleep 2
+        if [ $retry_count -eq 0 ]; then
+            echo -n "Waiting for Docker"
+        fi
+        echo -n "."
+        sleep 3  # Increased from 2 to 3 seconds
         ((retry_count++))
     done
-    if [ $retry_count -eq 10 ]; then
-        log_error "Docker daemon failed to restart properly"
-        exit 1
+    echo ""  # New line after dots
+    
+    if [ $retry_count -eq 20 ]; then
+        log_warning "Docker daemon took longer than expected to start"
+        log_warning "Attempting to continue - Docker may be working despite the delay"
+        # Don't exit here, just continue
+    else
+        log_success "Docker daemon restarted successfully"
     fi
 fi
 
 # Verify Docker sees the insecure registry
 log_info "Verifying Docker configuration..."
-if docker info 2>/dev/null | grep -q "localhost:$REGISTRY_PORT"; then
+if timeout 10 docker info 2>/dev/null | grep -q "localhost:$REGISTRY_PORT"; then
     log_success "Docker configured with insecure registry: localhost:$REGISTRY_PORT"
+elif timeout 10 docker info 2>/dev/null >/dev/null; then
+    log_warning "Docker is running but insecure registry may not be visible yet"
+    log_info "This is often normal and will work for registry operations"
 else
-    log_warning "Docker may not be properly configured, attempting to fix..."
-    # Force add to Docker config
-    echo "{\"insecure-registries\": [\"localhost:$REGISTRY_PORT\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
-    sudo systemctl daemon-reload
-    sudo systemctl restart docker
-    sleep 5
+    log_warning "Docker may not be fully ready yet, but continuing with deployment..."
+    log_info "Registry operations will be attempted anyway"
 fi
 
 # Docker login with retry and better error handling
@@ -261,53 +278,64 @@ log_info "Logging into registry..."
 login_retry=0
 LOGIN_SUCCESS=false
 
-while [ $login_retry -lt 3 ]; do
+while [ $login_retry -lt 5 ]; do  # Increased from 3 to 5 attempts
     # Try login and capture result
-    if echo "$REGISTRY_PASS" | docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1; then
+    if echo "$REGISTRY_PASS" | timeout 30 docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1; then
         log_success "Docker login successful"
         LOGIN_SUCCESS=true
         break
     else
         login_retry=$((login_retry + 1))
-        if [ $login_retry -lt 3 ]; then
-            log_warning "Docker login failed (attempt $login_retry/3), retrying in 5 seconds..."
+        if [ $login_retry -lt 5 ]; then
+            log_warning "Docker login failed (attempt $login_retry/5), retrying in 10 seconds..."
             
             # Debug: Show what we're trying to connect to
             echo "  Registry: $REGISTRY_HOST"
             echo "  User: $REGISTRY_USER"
             
+            # Check if Docker daemon is responsive
+            if ! timeout 10 docker info >/dev/null 2>&1; then
+                log_warning "Docker daemon not responsive, waiting longer..."
+                sleep 10
+                continue
+            fi
+            
             # Check if registry is actually running and accessible
             if curl -s -u "$REGISTRY_USER:$REGISTRY_PASS" "http://$REGISTRY_HOST/v2/" >/dev/null 2>&1; then
-                log_info "Registry API is accessible, Docker config may be the issue"
+                log_info "Registry API is accessible, Docker auth may be the issue"
                 
-                # Force reconfigure Docker
-                log_info "Forcing Docker reconfiguration..."
+                # Force reconfigure Docker (more carefully)
+                log_info "Updating Docker daemon configuration..."
                 echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
-                sudo systemctl daemon-reload
-                sudo systemctl restart docker
-                sleep 5
                 
-                # Wait for Docker to be ready
-                docker_ready=0
-                while [ $docker_ready -lt 10 ]; do
-                    if docker info >/dev/null 2>&1; then
-                        break
-                    fi
-                    sleep 1
-                    docker_ready=$((docker_ready + 1))
-                done
+                if sudo systemctl daemon-reload && sudo systemctl restart docker; then
+                    log_info "Docker reconfigured, waiting for it to be ready..."
+                    
+                    # Wait for Docker to be ready (with more patience)
+                    docker_ready=0
+                    while [ $docker_ready -lt 15 ]; do
+                        if timeout 5 docker info >/dev/null 2>&1; then
+                            log_info "Docker is ready after reconfiguration"
+                            break
+                        fi
+                        sleep 2
+                        docker_ready=$((docker_ready + 1))
+                    done
+                else
+                    log_warning "Docker reconfiguration may have failed, but continuing..."
+                fi
             else
                 log_warning "Registry API not accessible, checking pod status..."
                 kubectl get pods -l app=docker-registry 2>/dev/null || true
             fi
             
-            sleep 5
+            sleep 10  # Increased wait time
         fi
     fi
 done
 
 if [ "$LOGIN_SUCCESS" = false ]; then
-    log_error "❌ Docker login failed after 3 attempts"
+    log_error "❌ Docker login failed after 5 attempts"
     
     # Provide debugging information
     log_info "Debugging information:"
