@@ -80,32 +80,7 @@ spec:
     name: http
   selector:
     app: frontend
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: frontend
-  namespace: production
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-    nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-spec:
-  tls:
-  - hosts:
-    - sre-demo.local
-    secretName: frontend-tls
-  rules:
-  - host: sre-demo.local
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: frontend
-            port:
-              number: 3000
+# Ingress configuration moved to kubernetes/security/04-tls-ingress.yaml
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

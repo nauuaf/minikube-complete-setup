@@ -7,7 +7,7 @@ metadata:
 spec:
   acme:
     server: https://acme-staging-v02.api.letsencrypt.org/directory
-    email: admin@sre-assignment.local
+    email: admin@thmanyah.com
     privateKeySecretRef:
       name: letsencrypt-staging
     solvers:
@@ -23,7 +23,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: admin@sre-assignment.local
+    email: admin@thmanyah.com
     privateKeySecretRef:
       name: letsencrypt-prod
     solvers:
@@ -38,19 +38,26 @@ metadata:
   name: services-ingress
   namespace: production
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - sre-assignment.local
-    secretName: sre-assignment-tls
+    - nawaf.thmanyah.com
+    secretName: sre-platform-tls
   rules:
-  - host: sre-assignment.local
+  - host: nawaf.thmanyah.com
     http:
       paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 3000
       - path: /api
         pathType: Prefix
         backend:

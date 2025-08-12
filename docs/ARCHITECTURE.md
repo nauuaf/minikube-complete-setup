@@ -1,24 +1,46 @@
-# SRE Assignment Architecture
+# SRE Platform Architecture
 
 ## Overview
 
-This document describes the architecture of the SRE Assignment microservices platform, designed to demonstrate production-ready Kubernetes practices.
+This document describes the architecture of the production-ready microservices platform, featuring HTTPS/TLS with Let's Encrypt, comprehensive monitoring, and security best practices on Kubernetes.
 
 ## System Architecture
 
 ### High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Ingress Controller                    │
-│                 (NGINX + cert-manager)                   │
-└─────────────┬───────────────┬───────────────┬───────────┘
-              │               │               │
-    ┌─────────▼─────┐ ┌───────▼──────┐ ┌─────▼──────┐
-    │  API Service  │ │ Auth Service │ │Image Service│
-    │   (Node.js)   │ │     (Go)     │ │  (Python)   │
-    │   Port 3000   │ │  Port 8080   │ │  Port 5000  │
-    └───────────────┘ └──────────────┘ └─────────────┘
+🌐 Internet (HTTPS - nawaf.thmanyah.com)
+                    │
+          ┌─────────▼─────────┐
+          │ NGINX Ingress +   │ ◄─── Let's Encrypt TLS Certificates
+          │  cert-manager     │      Automatic SSL renewal
+          └─────────┬─────────┘
+                    │ Single entry point (HTTPS only)
+            ┌───────▼───────┐
+            │   Frontend    │ ◄─── React SPA + nginx proxy
+            │ (React/nginx) │      Routes all backend calls
+            │   Port 3000   │
+            │   HPA: 2-10   │
+            └───────┬───────┘
+                    │ Internal ClusterIP routing
+        ┌───────────┼───────────┐
+        │           │           │
+    ┌───▼──┐   ┌────▼───┐   ┌──▼────┐
+    │ API  │   │  Auth  │   │ Image │ ◄─── Backend Services (ClusterIP only)
+    │Node.js│   │   Go   │   │Python │     No external access
+    │ 3000 │   │  8080  │   │ 5000  │     Auto-scaling enabled  
+    │HPA:2-5│   │HPA:2-5 │   │HPA:2-5│
+    └───┬──┘   └────┬───┘   └───┬───┘
+        │           │           │
+        └───────────┼───────────┘
+                    │
+        ┌───────────┼───────────┐
+        │           │           │
+    ┌───▼──┐   ┌────▼────┐  ┌──▼────┐
+    │PostgreSQL│ │Redis   │  │MinIO  │ ◄─── Data Layer (Persistent)
+    │ 10GB  │  │ Cache  │  │  S3   │      Secure internal access
+    │ 5432  │  │ 6379   │  │ 9000  │      Network policies applied
+    └───────┘  └─────────┘  └───────┘
 ```
 
 ### Service Details
@@ -56,11 +78,12 @@ This document describes the architecture of the SRE Assignment microservices pla
 ### Infrastructure Components
 
 #### Kubernetes Resources
-- **Deployments**: Each service has its own deployment with 2 replicas minimum
-- **Services**: NodePort services for external access
+- **Deployments**: Each service has its own deployment with 2+ replicas
+- **Services**: Frontend (NodePort), Backend services (ClusterIP only)  
+- **Ingress**: Single HTTPS ingress with Let's Encrypt (nawaf.thmanyah.com)
 - **HPA**: Horizontal Pod Autoscaler with 70% CPU threshold
 - **PDB**: Pod Disruption Budget to ensure availability
-- **NetworkPolicies**: Service isolation and security
+- **NetworkPolicies**: Strict service isolation and security
 
 #### Security Components
 - **Secrets**: All sensitive data stored in Kubernetes Secrets
@@ -70,16 +93,18 @@ This document describes the architecture of the SRE Assignment microservices pla
 
 #### Monitoring Stack
 - **Prometheus**: Metrics collection and storage
-- **Grafana**: Visualization with 4 pre-configured dashboards
+- **Grafana**: Visualization with 6 pre-configured dashboards
+- **AlertManager**: Automated alerting and notifications
 - **Custom Metrics**: Application-specific metrics from all services
+- **Data Layer Monitoring**: PostgreSQL, Redis, MinIO metrics
 
 ### Data Flow
 
-1. **External Request** → Ingress Controller (NGINX)
-2. **Ingress** → API Service (Load Balancer)
-3. **API Service** → Auth Service (Token validation)
-4. **API Service** → Image Service (Processing request)
-5. **Response** ← Image Service ← API Service ← Client
+1. **External HTTPS Request** → NGINX Ingress (nawaf.thmanyah.com)
+2. **Ingress** → Frontend Service (React SPA)
+3. **Frontend nginx** → API/Auth/Image Services (Internal routing)
+4. **Backend Services** → PostgreSQL/Redis/MinIO (Data layer)
+5. **Response** ← Data Layer ← Backend Services ← Frontend ← Client
 
 ### Scalability Features
 

@@ -1,365 +1,416 @@
-# SRE Assignment - Ubuntu/Linux Kubernetes Platform
+## SRE Platform - Production Kubernetes Deployment
 
-**🐧 Optimized for Ubuntu 20.04+ and Linux distributions**
+**🚀 Production-ready microservices platform with HTTPS, monitoring, and auto-scaling**
 
-This project provides a complete production-ready Kubernetes microservices platform with private Docker registry, monitoring stack, and security best practices.
+This project demonstrates enterprise-grade SRE practices on Kubernetes with:
 
-## ✅ Implementation Checklist
+*   **HTTPS/TLS** with automatic Let's Encrypt certificates
+*   **4 Microservices**: Frontend (React), API (Node.js), Auth (Go), Image (Python)
+*   **Complete Data Layer**: PostgreSQL, Redis, MinIO S3 storage
+*   **Monitoring Stack**: Prometheus, Grafana, AlertManager with custom dashboards
+*   **Security**: NetworkPolicies, Secrets, Private Registry, Defense-in-depth
+*   **Auto-scaling**: HPA, PodDisruptionBudgets, Health probes
 
-- [✅] **4 Microservices**: Frontend (React), API (Node.js), Auth (Go), Image (Python) 
-- [✅] **Complete Data Layer**: PostgreSQL database, Redis cache, MinIO S3 storage
-- [✅] **Private Docker Registry**: Authentication + UI (works natively on Linux)
-- [✅] **Kubernetes Deployments**: HPA, resource limits, multiple replicas
-- [✅] **Data Persistence**: Persistent volumes for all data layer components
-- [✅] **Database Integration**: Full schemas, migrations, service connectivity
-- [✅] **Security**: NetworkPolicies, ClusterIP backends, Secrets, TLS
-- [✅] **Monitoring**: Prometheus + Grafana + AlertManager with data layer metrics
-- [✅] **Auto-scaling**: CPU-based HPA with proper resource management
-- [✅] **High Availability**: PodDisruptionBudgets, health probes, data resilience
-- [✅] **Ubuntu Optimization**: Native Docker networking, no tunneling
-- [✅] **Comprehensive Testing**: Functional tests + chaos engineering scenarios
+## 🏗️ System Architecture
 
-## 🚀 Quick Start (Ubuntu/Linux)
+```plaintext
+🌐 Internet (HTTPS via Domain)
+              │
+    ┌─────────▼─────────┐
+    │  Route 53 DNS     │ ◄─── thmanyah.com → EC2 IP
+    └─────────┬─────────┘
+              │
+┌─────────────▼──────────────┐
+│    NGINX Ingress + cert-manager │ ◄─── Automatic SSL from Let's Encrypt  
+│      (Single Entry Point)       │
+└─────────────┬──────────────┘
+              │ HTTPS Only
+      ┌───────▼───────┐
+      │   Frontend    │ ◄─── React SPA (Public)
+      │   Port 3000   │     Routes: /, /api, /auth, /image
+      │   HPA: 2-10   │
+      └───────┬───────┘
+              │ Internal routing
+    ┌─────────┼─────────┐
+    │         │         │
+┌───▼───┐ ┌──▼───┐ ┌───▼───┐
+│  API  │ │ Auth │ │Image  │ ◄─── Microservices (ClusterIP only)
+│Node.js│ │  Go  │ │Python │     No external access
+│ HPA   │ │ HPA  │ │ HPA   │
+└───┬───┘ └──┬───┘ └───┬───┘
+    │        │         │
+    └────────┼─────────┘
+             │
+   ┌─────────┼─────────┐
+   │         │         │
+┌──▼──┐ ┌───▼───┐ ┌───▼────┐
+│PostgreSQL │Redis│ │MinIO S3│ ◄─── Persistent Data Layer
+│ 10GB │ │2GB  │ │  20GB  │
+└─────┘ └─────┘ └────────┘
 
-### System Requirements
-- **OS**: Ubuntu 20.04+ or similar Linux distribution
-- **RAM**: 8GB minimum (12GB recommended for optimal performance)  
-- **CPU**: 4 cores minimum
-- **Disk**: 40GB free space
-- **Network**: Internet access for pulling base images
+┌─────────────────────────────┐
+│    Monitoring &amp; Security    │
+├──────────────┬──────────────┤
+│ Prometheus   │   Grafana    │ ◄─── 6 Custom Dashboards
+│ AlertManager │ NetworkPolicies│     Automatic Alerts
+└──────────────┴──────────────┘
+```
 
-### Prerequisites Installation
-```bash
+## 📋 AWS Resources Required
+
+| Resource | Configuration | Purpose |
+| --- | --- | --- |
+| **EC2 Instance** | t3.xlarge (4 vCPU, 16GB RAM) | Kubernetes host |
+| **EBS Volume** | 50GB gp3 | Storage |
+| **Security Group** | Ports 80,443,22,30000-32767 | Network access |
+| **Elastic IP** | Static IP address | DNS mapping |
+| **Route 53** | Hosted Zone + A record | Domain management |
+| **VPC** | Default VPC + Public subnet | Networking |
+
+**Estimated Monthly Cost**: ~$200-250 USD
+
+## 🚀 AWS Deployment Guide
+
+### Step 1: AWS Infrastructure Setup
+
+#### 1.1 Create EC2 Instance
+
+```plaintext
+# Via AWS Console:
+# 1. Launch Instance → Ubuntu 20.04 LTS
+# 2. Instance type: t3.xlarge  
+# 3. Storage: 50GB gp3
+# 4. Create new key pair: sre-platform-key.pem
+# 5. Create security group: sre-platform-sg
+```
+
+#### 1.2 Configure Security Group
+
+```plaintext
+# Inbound Rules (sre-platform-sg):
+Type         Protocol   Port Range    Source
+SSH          TCP        22           Your-IP/32
+HTTP         TCP        80           0.0.0.0/0
+HTTPS        TCP        443          0.0.0.0/0
+Custom TCP   TCP        30000-32767  0.0.0.0/0
+
+# Outbound Rules:
+All Traffic  All        All          0.0.0.0/0
+```
+
+#### 1.3 Allocate Elastic IP
+
+```plaintext
+# Via AWS Console:
+# EC2 → Elastic IPs → Allocate Elastic IP
+# Associate with your EC2 instance
+```
+
+#### 1.4 Configure DNS (Route 53)
+
+```plaintext
+# Via AWS Console:
+# Route 53 → Hosted Zones → Create Hosted Zone
+# Domain: thmanyah.com
+# Create A record: nawaf.thmanyah.com → ELASTIC_IP
+```
+
+### Step 2: Server Preparation
+
+#### 2.1 Connect to EC2
+
+```plaintext
+# Download your key pair and connect
+chmod 400 sre-platform-key.pem
+ssh -i sre-platform-key.pem ubuntu@<elastic_ip>
+```
+
+#### 2.2 Install Prerequisites
+
+```plaintext
+# Update system
+sudo apt update && sudo apt upgrade -y
+
 # Install Docker
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 
-# Install Minikube  
+# Install Kubernetes tools
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 sudo install minikube-linux-amd64 /usr/local/bin/minikube
 
-# Install kubectl
 curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 sudo install kubectl /usr/local/bin/kubectl
 
-# Install additional tools
-sudo apt update && sudo apt install -y jq curl wget bc helm
+# Install utilities
+sudo apt install -y jq curl wget bc git
+
+# Logout and login to apply docker group
+exit
+ssh -i sre-platform-key.pem ubuntu@<elastic_ip>
 ```
 
-### One-Command Deployment
-```bash
+### Step 3: Deploy Platform
+
+#### 3.1 Clone and Configure
+
+```plaintext
+# Clone repository
+git clone https://github.com/your-username/sre-assignment.git
+cd sre-assignment
+
+# Update domain configuration
+./scripts/configure-dns.sh nawaf.thmanyah.com
+```
+
+#### 3.2 Start Platform
+
+```plaintext
 # Validate prerequisites
 ./prereq-check.sh
 
-# Deploy complete platform (10-15 minutes)
+# Deploy complete platform (15-20 minutes)
 ./start.sh
 
-# Run comprehensive tests
-./test-scenarios.sh
-
-# Stop and cleanup
-./stop.sh
+# The script will:
+# ✅ Start Minikube cluster
+# ✅ Build and push all service images  
+# ✅ Deploy all services with monitoring
+# ✅ Configure ingress and networking
 ```
 
-## 🏗️ Architecture Overview
+#### 3.3 Install Production Components
 
-```
-                    External Traffic (HTTPS/TLS)
-                                │
-        ┌───────────────────────▼─────────────────────────┐
-        │              Ingress Controller                 │
-        │           (NGINX with TLS/cert-manager)         │
-        └───────────────────────┬─────────────────────────┘
-                                │
-                        ┌───────▼───────┐
-                        │   Frontend    │  ◄─── Only Public Service
-                        │  (React/Ant)  │
-                        │   Port 3000   │
-                        │   HPA: 2-10   │
-                        └───────┬───────┘
-                                │ nginx proxy
-                ┌───────────────┼───────────────┐
-                │               │               │
-        ┌───────▼──────┐ ┌─────▼──────┐ ┌─────▼──────┐
-        │  API Service │ │Auth Service│ │Image Service│ ◄─── ClusterIP Only
-        │   (Node.js)  │ │    (Go)    │ │  (Python)   │     (Internal Only)
-        │   Port 3000  │ │  Port 8080 │ │  Port 5000  │
-        │   HPA: 2-5   │ │  HPA: 2-5  │ │  HPA: 2-5   │
-        └───────┬──────┘ └─────┬──────┘ └─────┬──────┘
-                │              │              │
-                └──────────────┼──────────────┘
-                               │
-            ┌──────────────────┼──────────────────┐
-            │                  │                  │
-    ┌───────▼──────┐ ┌────────▼────────┐ ┌──────▼──────┐
-    │ PostgreSQL   │ │  Redis Cache    │ │ MinIO S3    │ ◄─── Data Layer
-    │  Database    │ │   (Sessions)    │ │ (Storage)   │     (Persistent)
-    │  Port 5432   │ │   Port 6379     │ │ Port 9000   │
-    │ Persistent   │ │  Persistent     │ │ Persistent  │
-    └──────────────┘ └─────────────────┘ └─────────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        │          Private Docker Registry (Auth)       │
-        │         Kubernetes Cluster (Secured)          │
-        │  • NetworkPolicies  • Secrets  • ConfigMaps  │
-        │  • PersistentVolumes • Services • Deployments │
-        └─────────────────┬─────────────┬───────────────┘
-                          │             │
-                ┌─────────▼──────────┐  │  ┌─────────▼──────────┐
-                │    Prometheus      │  │  │     Grafana        │
-                │  Metrics Storage   │◄─┘  │  6 Dashboards      │
-                │ + DB/Redis/S3     │     │ + Data Layer       │
-                │   Exporters       │     │   Monitoring       │
-                └────────────────────┘     └────────────────────┘
+```plaintext
+# Install cert-manager for SSL
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+
+# Install NGINX Ingress Controller
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+
+# Wait for ingress controller
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=300s
+
+# Deploy TLS configuration
+kubectl apply -f kubernetes/security/04-tls-ingress.yaml
 ```
 
-## 📊 Complete Service Architecture
+### Step 4: Verification and Access
 
-### Application Services
-| Service | Language | Port | Replicas | CPU Request | Memory Request |
-|---------|----------|------|----------|-------------|----------------|
-| Frontend | React/Nginx | 3000 | 2-10 | 50m | 64Mi |
-| API | Node.js | 3000 | 2-5 | 100m | 128Mi |
-| Auth | Go | 8080 | 2-5 | 100m | 128Mi |
-| Image | Python | 5000 | 2-5 | 100m | 128Mi |
+#### 4.1 Check Deployment Status
 
-### Data Layer Services  
-| Service | Technology | Port | Storage | CPU Request | Memory Request |
-|---------|------------|------|---------|-------------|----------------|
-| PostgreSQL | PostgreSQL 15 | 5432 | 10Gi PV | 200m | 256Mi |
-| Redis | Redis 7 | 6379 | 2Gi PV | 100m | 128Mi |
-| MinIO | MinIO S3 | 9000/9001 | 20Gi PV | 200m | 256Mi |
+```plaintext
+# Verify all pods are running
+kubectl get pods --all-namespaces
 
-### Infrastructure Services
-| Service | Technology | Port | Purpose | CPU Request | Memory Request |
-|---------|------------|------|---------|-------------|----------------|
-| Registry | Docker Registry v2 | 5000 | Private images | 100m | 256Mi |
-| Prometheus | Prometheus | 9090 | Metrics | 200m | 512Mi |
-| Grafana | Grafana | 3000 | Dashboards | 100m | 256Mi |
+# Check certificate status  
+kubectl get certificate -n production
+kubectl describe certificate sre-platform-tls -n production
 
-## 🔐 Security Features
+# Monitor ingress
+kubectl get ingress -n production
+kubectl describe ingress services-ingress -n production
+```
 
-- **Defense in Depth Architecture**: Only frontend exposed publicly
-- **Network Segmentation**: Backend services and data layer use ClusterIP only
-- **Database Security**: PostgreSQL isolated with authentication and network policies
-- **Cache Security**: Redis with password authentication and restricted access
-- **Storage Security**: MinIO with access keys and bucket policies
-- **Private Docker Registry** with HTTP Basic Auth
-- **NetworkPolicies** enforce strict inter-service and data layer communication
-- **Frontend Proxy**: All backend access routed through nginx proxy
-- **TLS/HTTPS** via cert-manager and Let's Encrypt
-- **Kubernetes Secrets** for all sensitive data (DB, Redis, S3 credentials)
-- **Zero external backend exposure** - services and data isolated within cluster
+#### 4.2 Access Services
 
-## 🧪 Testing Scenarios
+```plaintext
+# Primary access (HTTPS with SSL)
+echo "Frontend:    https://nawaf.thmanyah.com"
+echo "Grafana:     https://nawaf.thmanyah.com/grafana"
+echo "Prometheus:  https://nawaf.thmanyah.com/prometheus"
 
-### Functional Tests
-1. **Infrastructure Layer**: PostgreSQL, Redis, MinIO connectivity and operations
-2. **Application Services**: Health checks, database connections, S3 uploads
-3. **Frontend Integration**: Proxy configuration and service communication
-4. **Data Integration**: User creation, session storage, image uploads
-5. **Monitoring Stack**: Metrics collection from all services and data layer
-6. **Security**: Network isolation, secrets management, authentication
-
-### Chaos Engineering Tests  
-1. **Pod Failure Recovery**: Automatically recovers from pod crashes
-2. **Database Resilience**: Services reconnect after PostgreSQL restart
-3. **Load Testing**: HPA scales services under load
-4. **Network Partition**: Network policies properly isolate services
-5. **Storage Performance**: MinIO handles concurrent operations
-6. **Cache Failover**: Redis persistence and recovery testing
-
-## 📈 Service Access (Ubuntu/Linux)
-
-After successful deployment, access services using the Minikube IP:
-
-```bash
-# Get your Minikube IP
+# Fallback access (HTTP NodePort) - for debugging only
 MINIKUBE_IP=$(minikube ip)
-echo "Minikube IP: $MINIKUBE_IP"
-
-# Service URLs  
 echo "Frontend:    http://$MINIKUBE_IP:30004"
-echo "Registry UI: http://$MINIKUBE_IP:30501"  
-echo "Prometheus:  http://$MINIKUBE_IP:30090"
 echo "Grafana:     http://$MINIKUBE_IP:30030"
+echo "Registry:    http://$MINIKUBE_IP:30501"
 ```
 
 **Default Credentials:**
-- **Registry**: admin / SecurePass123!
-- **Grafana**: admin / admin123
 
-## 🔍 Platform Validation
+*   **Grafana**: admin / admin123
+*   **Registry**: admin / SecurePass123!
 
-### Automated Testing
-```bash
-# Run comprehensive test suite
+#### 4.3 Run Tests
+
+```plaintext
+# Comprehensive platform testing
 ./test-scenarios.sh
 
 # Tests include:
-# ✅ Service health and connectivity
-# ✅ Registry authentication and image pulling  
+# ✅ SSL certificate validation
+# ✅ Service connectivity and health  
+# ✅ Database operations
 # ✅ Auto-scaling under load
-# ✅ Network policy enforcement
-# ✅ Monitoring stack functionality
 # ✅ Failure recovery scenarios
+# ✅ Security policy enforcement
 ```
 
-### Manual Verification
-```bash
-# Check all pods are running
-kubectl get pods --all-namespaces
+## 🔧 Configuration Management
 
-# Verify registry contents
-curl -u admin:SecurePass123! http://$MINIKUBE_IP:30500/v2/_catalog
+### Update Domain
 
-# Test frontend connectivity
-curl -s http://$MINIKUBE_IP:30004/health
+```plaintext
+# Change domain after deployment
+./scripts/configure-dns.sh new-domain.com
 
-# Monitor resource usage
+# Apply changes
+kubectl apply -f kubernetes/security/04-tls-ingress.yaml
+```
+
+### Scale Services
+
+```plaintext
+# Manual scaling
+kubectl scale deployment frontend --replicas=5 -n production
+
+# Update HPA limits
+kubectl patch hpa frontend-hpa -n production -p '{"spec":{"maxReplicas":15}}'
+```
+
+### Monitor Resources
+
+```plaintext
+# Resource usage
 kubectl top pods --all-namespaces
+kubectl top nodes
+
+# Logs
+kubectl logs -f deployment/frontend -n production
+kubectl logs -f deployment/api-service -n production
 ```
 
-## 🐧 Ubuntu/Linux Advantages
+## 🔒 Security Features
 
-This platform is **optimized for Ubuntu/Linux** and provides:
+*   **HTTPS Everywhere**: All traffic encrypted with Let's Encrypt
+*   **Network Isolation**: Backend services only accessible via frontend
+*   **Secrets Management**: All credentials stored as Kubernetes secrets
+*   **Private Registry**: Container images stored in authenticated registry
+*   **Security Policies**: NetworkPolicies restrict pod-to-pod communication
+*   **Resource Limits**: CPU/Memory limits prevent resource abuse
 
-✅ **Native Docker Registry**: No Docker Desktop limitations  
-✅ **Direct NodePort Access**: No tunneling or port-forwarding required  
-✅ **Better Resource Utilization**: Native container networking  
-✅ **Production-Ready**: Suitable for actual cloud deployment  
-✅ **Firewall Integration**: Easy remote access configuration  
+## 📊 Monitoring & Alerting
 
-### Remote Access Setup
-```bash
-# Allow NodePort range through firewall
-sudo ufw allow 30000:32767/tcp
+**6 Custom Grafana Dashboards:**
 
-# Or specific services only
-sudo ufw allow 30004/tcp  # Frontend
-sudo ufw allow 30030/tcp  # Grafana  
-sudo ufw allow 30500/tcp  # Registry
+1.  **System Overview**: Cluster health and resource usage
+2.  **API Service**: Request rates, latency, error rates
+3.  **Auth Service**: Authentication metrics and performance
+4.  **Image Service**: Upload/processing statistics
+5.  **Database Layer**: PostgreSQL, Redis, MinIO metrics
+6.  **Security Dashboard**: Failed authentications, policy violations
+
+**Automatic Alerts:**
+
+*   High CPU/Memory usage
+*   Service downtime
+*   Database connection failures
+*   SSL certificate expiration
+*   Storage space warnings
+
+## 🚨 Troubleshooting
+
+### SSL Certificate Issues
+
+```plaintext
+# Check certificate status
+kubectl get certificate -n production
+kubectl describe certificate sre-platform-tls -n production
+
+# Check cert-manager logs
+kubectl logs -n cert-manager deployment/cert-manager
+
+# Manual certificate request
+kubectl delete certificate sre-platform-tls -n production
+kubectl apply -f kubernetes/security/04-tls-ingress.yaml
 ```
 
-## 💡 Key Features Demonstrated
+### Service Issues
 
-- **High Availability**: Multiple replicas with PodDisruptionBudget
-- **Auto-scaling**: CPU-based HPA (70% threshold)
-- **Security**: NetworkPolicies, Secrets, TLS, Registry Auth
-- **Observability**: Metrics, logs, traces, dashboards
-- **Resilience**: Health checks, circuit breakers
-- **Best Practices**: Resource limits, proper probes, graceful shutdown
+```plaintext
+# Check pod status
+kubectl get pods -n production
+kubectl describe pod <pod-name> -n production
 
-## 🛠️ Management Commands
+# Check service endpoints
+kubectl get endpoints -n production
 
-### Platform Lifecycle
-```bash
-# Start complete platform
-./start.sh
-
-# Stop services (preserve data)
-./stop.sh  
-
-# Complete cleanup and cluster deletion
-./stop.sh --delete-cluster
+# Restart deployment
+kubectl rollout restart deployment/<service-name> -n production
 ```
 
-### Troubleshooting
-```bash
-# Collect logs for debugging
-kubectl logs --all-containers --tail=100 -l app=api-service -n production
+### DNS Issues
 
-# Restart stuck services  
-kubectl rollout restart deployment/api-service -n production
+```plaintext
+# Test DNS resolution
+nslookup nawaf.thmanyah.com
+dig nawaf.thmanyah.com
 
-# Check resource usage
-kubectl top pods --all-namespaces
-kubectl describe node minikube
+# Check ingress
+kubectl get ingress -n production -o yaml
 ```
 
-### Development Workflow
-```bash
-# Build and push new image
-docker build -t my-service:2.0.0 ./services/my-service/
-docker tag my-service:2.0.0 $(minikube ip):30500/my-service:2.0.0  
-docker push $(minikube ip):30500/my-service:2.0.0
+## 🛠️ Maintenance
+
+### Backup Data
+
+```plaintext
+# Database backup
+kubectl exec -n production deployment/postgresql -- pg_dump -U postgres sre_db &gt; backup.sql
+
+# Redis backup  
+kubectl exec -n production deployment/redis -- redis-cli BGSAVE
+```
+
+### Update Services
+
+```plaintext
+# Build new image
+docker build -t api-service:v2.0 ./services/api-service/
+
+# Push to registry
+docker tag api-service:v2.0 $(minikube ip):30500/api-service:v2.0
+docker push $(minikube ip):30500/api-service:v2.0
 
 # Update deployment
-kubectl set image deployment/my-service app=$(minikube ip):30500/my-service:2.0.0 -n production
+kubectl set image deployment/api-service api-service=$(minikube ip):30500/api-service:v2.0 -n production
 ```
 
-## 📂 Project Structure
+### Platform Cleanup
 
-```
-sre-assignment/
-├── README.md                    # This comprehensive guide
-├── start.sh                     # Main deployment script (Ubuntu optimized)
-├── stop.sh                      # Cleanup script
-├── prereq-check.sh             # System requirements validation  
-├── test-scenarios.sh           # Comprehensive testing suite
-├── config/
-│   └── config.env              # Platform configuration (Ubuntu tuned)
-├── services/                   # Microservices source code
-│   ├── api-service/            # Node.js REST API
-│   ├── auth-service/           # Go authentication service
-│   ├── image-service/          # Python image processing
-│   └── frontend/               # React frontend with nginx
-├── kubernetes/                 # Kubernetes manifests
-│   ├── core/                   # Infrastructure components
-│   ├── security/               # NetworkPolicies, Secrets, TLS
-│   ├── apps/                   # Application deployments
-│   └── monitoring/             # Prometheus, Grafana, AlertManager
-├── scripts/                    # Utility scripts
-│   ├── registry-auth.sh        # Registry authentication setup
-│   ├── health-checks.sh        # System health validation
-│   ├── import-dashboards.sh    # Grafana dashboard import
-│   └── update-registry-refs.sh # Dynamic registry configuration
-└── tests/                      # Test scenarios and validation
+```plaintext
+# Stop services (preserve data)
+./stop.sh
+
+# Complete cleanup
+./stop.sh --delete-cluster
+
+# AWS resource cleanup
+# - Terminate EC2 instance
+# - Release Elastic IP  
+# - Delete security group
+# - Remove DNS records
 ```
 
-## 🚀 Production Deployment
+## 📈 Performance Optimization
 
-This platform is designed for **Ubuntu/Linux production environments**:
+**For Production Traffic:**
 
-### Cloud Deployment (AWS/GCP/Azure)
-```bash
-# On Ubuntu 20.04+ VM with 8GB RAM, 4 CPUs
-git clone <repository>
-cd sre-assignment
-./prereq-check.sh && ./start.sh
+*   Upgrade to `c5.2xlarge` (8 vCPU, 16GB RAM)
+*   Use Application Load Balancer instead of NodePort
+*   Implement Redis Cluster for high availability
+*   Consider RDS for managed PostgreSQL
+*   Add CloudFront CDN for static assets
 
-# Configure security groups/firewall for ports 30000-32767
-# Access services via <VM_IP>:30004 (frontend)
-```
+**Monitoring Recommendations:**
 
-### On-Premises Deployment  
-```bash
-# Dedicated Ubuntu server
-sudo ufw allow 30000:32767/tcp
-./start.sh
+*   Set up CloudWatch integration
+*   Configure automated backups
+*   Implement log aggregation with ELK stack
+*   Add distributed tracing with Jaeger
 
-# Services accessible on local network via server IP
-```
-
-### Container Orchestration Migration
-- **Kubernetes**: Production-ready manifests in `kubernetes/`
-- **Docker Swarm**: Convert using `kompose convert`  
-- **OpenShift**: Compatible with minimal modifications
-
-## ⚡ Performance Optimizations
-
-**Ubuntu/Linux Advantages:**
-- ✅ Native container networking (no NAT overhead)
-- ✅ Direct NodePort access (no tunneling latency)  
-- ✅ Efficient resource utilization (no virtualization layer)
-- ✅ Production-grade registry functionality
-- ✅ Seamless scaling and load balancing
-
-**Recommended VM Sizing:**
-- **Development**: 8GB RAM, 4 vCPUs, 40GB disk
-- **Production**: 16GB RAM, 8 vCPUs, 100GB disk  
-- **High-Load**: 32GB RAM, 16 vCPUs, 200GB disk
-
----
-
-**🐧 Ubuntu/Linux Kubernetes Platform - Production Ready!**
+**🏆 Complete Production Kubernetes Platform - Ready for Enterprise!**

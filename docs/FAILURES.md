@@ -104,10 +104,10 @@ kubectl rollout restart deployment/docker-registry
 ```bash
 # Check certificate status
 kubectl get certificates -n production
-kubectl describe certificate sre-assignment-tls -n production
+kubectl describe certificate sre-platform-tls -n production
 
 # Force renewal
-kubectl delete certificate sre-assignment-tls -n production
+kubectl delete certificate sre-platform-tls -n production
 ```
 
 #### Secret Compromise
