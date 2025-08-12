@@ -253,24 +253,46 @@ fi
 # Docker login with retry and better error handling
 log_info "Logging into registry..."
 login_retry=0
+LOGIN_SUCCESS=false
+
 while [ $login_retry -lt 3 ]; do
-    # Capture the actual error for debugging
-    LOGIN_OUTPUT=$(echo $REGISTRY_PASS | docker login $REGISTRY_HOST -u $REGISTRY_USER --password-stdin 2>&1)
-    if [ $? -eq 0 ]; then
+    # Try login and capture result
+    if echo "$REGISTRY_PASS" | docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1; then
         log_success "Docker login successful"
+        LOGIN_SUCCESS=true
         break
     else
-        ((login_retry++))
+        login_retry=$((login_retry + 1))
         if [ $login_retry -lt 3 ]; then
             log_warning "Docker login failed (attempt $login_retry/3), retrying in 5 seconds..."
-            log_warning "Error: $LOGIN_OUTPUT"
             
-            # Check if registry is actually running
-            REGISTRY_POD=$(kubectl get pods -l app=docker-registry -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-            if [ -n "$REGISTRY_POD" ]; then
-                log_info "Registry pod $REGISTRY_POD is running"
-                # Try to get registry logs for debugging
-                kubectl logs $REGISTRY_POD --tail=5 2>/dev/null || true
+            # Debug: Show what we're trying to connect to
+            echo "  Registry: $REGISTRY_HOST"
+            echo "  User: $REGISTRY_USER"
+            
+            # Check if registry is actually running and accessible
+            if curl -s -u "$REGISTRY_USER:$REGISTRY_PASS" "http://$REGISTRY_HOST/v2/" >/dev/null 2>&1; then
+                log_info "Registry API is accessible, Docker config may be the issue"
+                
+                # Force reconfigure Docker
+                log_info "Forcing Docker reconfiguration..."
+                echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
+                sudo systemctl daemon-reload
+                sudo systemctl restart docker
+                sleep 5
+                
+                # Wait for Docker to be ready
+                docker_ready=0
+                while [ $docker_ready -lt 10 ]; do
+                    if docker info >/dev/null 2>&1; then
+                        break
+                    fi
+                    sleep 1
+                    docker_ready=$((docker_ready + 1))
+                done
+            else
+                log_warning "Registry API not accessible, checking pod status..."
+                kubectl get pods -l app=docker-registry 2>/dev/null || true
             fi
             
             sleep 5
@@ -278,16 +300,19 @@ while [ $login_retry -lt 3 ]; do
     fi
 done
 
-if [ $login_retry -eq 3 ]; then
+if [ "$LOGIN_SUCCESS" = false ]; then
     log_error "❌ Docker login failed after 3 attempts"
-    log_error "Last error: $LOGIN_OUTPUT"
     
     # Provide debugging information
     log_info "Debugging information:"
     echo "Registry URL: $REGISTRY_HOST"
     echo "Registry User: $REGISTRY_USER"
     echo "Testing direct registry access..."
-    curl -u $REGISTRY_USER:$REGISTRY_PASS http://$REGISTRY_HOST/v2/_catalog 2>/dev/null || echo "Direct access failed"
+    if curl -u "$REGISTRY_USER:$REGISTRY_PASS" "http://$REGISTRY_HOST/v2/_catalog" 2>/dev/null; then
+        echo "✓ Direct registry access works"
+    else
+        echo "✗ Direct registry access failed"
+    fi
     
     log_info "Docker insecure registries configuration:"
     docker info 2>/dev/null | grep -A5 "Insecure Registries" || true
@@ -295,8 +320,9 @@ if [ $login_retry -eq 3 ]; then
     log_info "Registry pod status:"
     kubectl get pods -l app=docker-registry || true
     
-    # Try alternative approach - skip login and push with --insecure flag
-    log_warning "Attempting to continue without login (using direct push)..."
+    # Don't exit - try to continue with local images
+    log_warning "Registry login failed, but continuing with deployment..."
+    log_warning "Will attempt to use local images or pull from registry during deployment"
     SKIP_LOGIN=true
 fi
 
@@ -329,18 +355,31 @@ push_image() {
     return 1
 }
 
-# Push all images
-PUSH_FAILED=false
-push_image "$REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
-push_image "$REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
-push_image "$REGISTRY_HOST/image-service:$IMAGE_VERSION" || PUSH_FAILED=true
-push_image "$REGISTRY_HOST/frontend:$FRONTEND_VERSION" || PUSH_FAILED=true
+# Push all images (skip if login failed)
+if [ "$SKIP_LOGIN" != "true" ]; then
+    PUSH_FAILED=false
+    push_image "$REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
+    push_image "$REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
+    push_image "$REGISTRY_HOST/image-service:$IMAGE_VERSION" || PUSH_FAILED=true
+    push_image "$REGISTRY_HOST/frontend:$FRONTEND_VERSION" || PUSH_FAILED=true
 
-if [ "$PUSH_FAILED" = true ]; then
-    log_warning "Some images failed to push, but continuing with deployment..."
-    log_warning "Services will try to pull from registry during deployment"
+    if [ "$PUSH_FAILED" = true ]; then
+        log_warning "Some images failed to push, but continuing with deployment..."
+        log_warning "Services will try to pull from registry during deployment"
+    else
+        log_success "All images pushed to registry successfully"
+    fi
 else
-    log_success "All images pushed to registry successfully"
+    log_warning "Skipping image push due to registry login failure"
+    log_info "Loading images directly into Minikube instead..."
+    
+    # Load images directly into Minikube as fallback
+    minikube image load api-service:$API_VERSION
+    minikube image load auth-service:$AUTH_VERSION
+    minikube image load image-service:$IMAGE_VERSION
+    minikube image load frontend:$FRONTEND_VERSION
+    
+    log_success "Images loaded directly into Minikube"
 fi
 
 # Verify registry contents
