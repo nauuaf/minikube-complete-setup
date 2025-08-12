@@ -172,30 +172,35 @@ cd sre-assignment
 # Deploy complete platform (15-20 minutes)
 ./start.sh
 
-# The script will:
+# The script will automatically:
 # ✅ Start Minikube cluster
 # ✅ Build and push all service images  
+# ✅ Install NGINX Ingress Controller
+# ✅ Install cert-manager for Let's Encrypt
 # ✅ Deploy all services with monitoring
-# ✅ Configure ingress and networking
+# ✅ Configure HTTPS with automatic SSL certificates
+# ✅ Set up ingress for nawaf.thmanyah.com
 ```
 
-#### 3.3 Install Production Components
+#### 3.3 Verify HTTPS Setup
 
 ```plaintext
-# Install cert-manager for SSL
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+# The start.sh script has already installed everything needed for HTTPS!
+# Just verify the components are running:
 
-# Install NGINX Ingress Controller
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+# Check ingress controller
+kubectl get pods -n ingress-nginx
 
-# Wait for ingress controller
-kubectl wait --namespace ingress-nginx \
-  --for=condition=ready pod \
-  --selector=app.kubernetes.io/component=controller \
-  --timeout=300s
+# Check cert-manager
+kubectl get pods -n cert-manager
 
-# Deploy TLS configuration
-kubectl apply -f kubernetes/security/04-tls-ingress.yaml
+# Check certificate status (Let's Encrypt)
+kubectl get certificate -n production
+kubectl describe certificate sre-platform-tls -n production
+
+# Check ingress configuration
+kubectl get ingress -n production
+kubectl describe ingress services-ingress -n production
 ```
 
 ### Step 4: Verification and Access

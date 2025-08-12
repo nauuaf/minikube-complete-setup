@@ -219,13 +219,38 @@ log_success "All images pushed to registry successfully"
 log_info "Verifying registry contents..."
 curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog | jq .
 
-# Step 10: Deploy security components
+# Step 10: Install Ingress Controller and cert-manager for HTTPS
+log_info "Installing NGINX Ingress Controller..."
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+
+log_info "Waiting for Ingress Controller to be ready..."
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=300s || log_warning "Ingress controller taking longer than expected"
+
+log_info "Installing cert-manager for Let's Encrypt certificates..."
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+
+log_info "Waiting for cert-manager to be ready..."
+kubectl wait --namespace cert-manager \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/instance=cert-manager \
+  --timeout=300s || log_warning "cert-manager taking longer than expected"
+
+# Give cert-manager webhooks time to be ready
+sleep 15
+
+# Step 11: Deploy security components
 log_info "Deploying security components..."
 kubectl apply -f kubernetes/security/02-secrets.yaml
 kubectl apply -f kubernetes/security/03-network-policies.yaml
+
+# Deploy TLS configuration (this will now work with cert-manager installed)
+log_info "Configuring TLS with Let's Encrypt for nawaf.thmanyah.com..."
 kubectl apply -f kubernetes/security/04-tls-ingress.yaml
 
-# Step 11: Deploy data layer (PostgreSQL, Redis, MinIO)
+# Step 12: Deploy data layer (PostgreSQL, Redis, MinIO)
 log_info "Deploying data infrastructure..."
 kubectl apply -f kubernetes/data/12-postgresql.yaml
 kubectl apply -f kubernetes/data/13-redis.yaml
@@ -239,7 +264,7 @@ health_check "minio" $NAMESPACE_PROD
 log_info "Waiting for MinIO bucket initialization..."
 kubectl wait --for=condition=complete job/minio-bucket-init -n $NAMESPACE_PROD --timeout=300s
 
-# Step 12: Deploy applications
+# Step 13: Deploy applications
 log_info "Deploying applications..."
 
 # Update manifests with correct registry references
@@ -253,7 +278,7 @@ health_check "auth-service" $NAMESPACE_PROD
 health_check "image-service" $NAMESPACE_PROD
 health_check "frontend" $NAMESPACE_PROD
 
-# Step 13: Deploy monitoring
+# Step 14: Deploy monitoring
 log_info "Deploying monitoring stack..."
 kubectl apply -f kubernetes/monitoring/08-prometheus.yaml
 kubectl apply -f kubernetes/monitoring/09-grafana.yaml
@@ -263,16 +288,16 @@ health_check "prometheus" $NAMESPACE_MONITORING
 health_check "grafana" $NAMESPACE_MONITORING
 health_check "alertmanager" $NAMESPACE_MONITORING
 
-# Step 14: Import Grafana dashboards
+# Step 15: Import Grafana dashboards
 log_info "Importing Grafana dashboards..."
 sleep 10
 ./scripts/import-dashboards.sh
 
-# Step 15: Run smoke tests
+# Step 16: Run smoke tests
 log_info "Running smoke tests..."
 ./scripts/health-checks.sh
 
-# Step 16: Display access information
+# Step 17: Display access information
 echo -e "\n${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ Setup Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -292,7 +317,17 @@ echo "MinIO S3 API: http://$MINIKUBE_IP:30900"
 echo "MinIO Console: http://$MINIKUBE_IP:30901"
 echo "MinIO Credentials: AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxFCYEXAMPLEKE"
 
-echo -e "\n${YELLOW}🚀 Services (NodePort Access):${NC}"
+echo -e "\n${YELLOW}🌐 HTTPS Access (via Domain):${NC}"
+echo "Main URL: ${GREEN}https://nawaf.thmanyah.com${NC}"
+echo "  - Frontend: https://nawaf.thmanyah.com"
+echo "  - API: https://nawaf.thmanyah.com/api"
+echo "  - Auth: https://nawaf.thmanyah.com/auth"
+echo "  - Images: https://nawaf.thmanyah.com/image"
+echo ""
+echo "Note: DNS A record must point nawaf.thmanyah.com to $MINIKUBE_IP"
+echo "Certificate Status: kubectl get certificate -n production"
+
+echo -e "\n${YELLOW}🚀 Services (Direct NodePort Access):${NC}"
 echo "Frontend (Public): http://$MINIKUBE_IP:$FRONTEND_NODEPORT"
 echo "API Service: ClusterIP only (accessible via frontend)"
 echo "Auth Service: ClusterIP only (accessible via frontend)"  
