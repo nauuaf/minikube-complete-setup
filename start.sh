@@ -454,6 +454,13 @@ kubectl apply -f kubernetes/security/04-tls-ingress.yaml
 
 # Step 12: Deploy data layer (PostgreSQL, Redis, MinIO)
 log_info "Deploying data infrastructure..."
+
+# Clean up any existing MinIO bucket initialization job first (Jobs are immutable in Kubernetes)
+log_info "Cleaning up existing MinIO bucket initialization job..."
+kubectl delete job minio-bucket-init -n $NAMESPACE_PROD 2>/dev/null || true
+sleep 5
+
+# Deploy data infrastructure
 kubectl apply -f kubernetes/data/12-postgresql.yaml
 kubectl apply -f kubernetes/data/13-redis.yaml
 kubectl apply -f kubernetes/data/14-minio.yaml

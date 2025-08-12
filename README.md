@@ -324,6 +324,19 @@ kubectl logs -f deployment/api-service -n production
 
 ## 🚨 Troubleshooting
 
+### Kubernetes Job "field is immutable" Errors
+
+```plaintext
+# If you see: "The Job 'job-name' is invalid: spec.template: Invalid value: ... field is immutable"
+# This means you're trying to update an existing Job, but Jobs cannot be modified
+
+# Solution: Delete and recreate the job
+kubectl delete job <job-name> -n <namespace>
+kubectl apply -f <job-yaml-file>
+
+# This is handled automatically in start.sh for MinIO bucket initialization
+```
+
 ### SSL Certificate Issues
 
 ```plaintext
@@ -345,6 +358,10 @@ kubectl apply -f kubernetes/security/04-tls-ingress.yaml
 # Check MinIO bucket initialization status
 kubectl get job minio-bucket-init -n production
 kubectl logs -l app=minio-init -n production
+
+# If you get "field is immutable" error, delete the job first
+kubectl delete job minio-bucket-init -n production
+kubectl apply -f kubernetes/data/14-minio.yaml
 
 # Manual bucket initialization (if automated job fails)
 ./scripts/manual-minio-init.sh

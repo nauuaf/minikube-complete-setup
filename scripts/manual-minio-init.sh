@@ -33,10 +33,16 @@ fi
 
 log_success "MinIO pod is running"
 
-# Delete any existing initialization job
+# Delete any existing initialization job (Jobs are immutable in Kubernetes)
 log_info "Cleaning up any existing initialization job..."
-kubectl delete job minio-bucket-init -n $NAMESPACE_PROD 2>/dev/null || true
-sleep 5
+if kubectl get job minio-bucket-init -n $NAMESPACE_PROD >/dev/null 2>&1; then
+    log_info "Found existing job, deleting it first..."
+    kubectl delete job minio-bucket-init -n $NAMESPACE_PROD
+    log_info "Waiting for job deletion to complete..."
+    sleep 10
+else
+    log_info "No existing job found"
+fi
 
 # Create a new initialization job
 log_info "Creating new bucket initialization job..."
