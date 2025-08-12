@@ -326,12 +326,31 @@ if [ "$LOGIN_SUCCESS" = false ]; then
     SKIP_LOGIN=true
 fi
 
-# Tag and push images
+# Check if Minikube is still accessible
+log_info "Checking Minikube status..."
+if ! minikube status >/dev/null 2>&1; then
+    log_error "Minikube is not running or not accessible"
+    log_info "Attempting to restart Minikube..."
+    minikube stop || true
+    sleep 5
+    minikube start --memory=$MEMORY --cpus=$CPUS --disk-size=$DISK_SIZE
+    sleep 10
+    MINIKUBE_IP=$(minikube ip)
+    REGISTRY_HOST="$MINIKUBE_IP:$REGISTRY_PORT"
+    log_success "Minikube restarted with IP: $MINIKUBE_IP"
+fi
+
+# Tag and push images (with error handling)
 log_info "Tagging images for registry..."
-docker tag api-service:$API_VERSION $REGISTRY_HOST/api-service:$API_VERSION
-docker tag auth-service:$AUTH_VERSION $REGISTRY_HOST/auth-service:$AUTH_VERSION
-docker tag image-service:$IMAGE_VERSION $REGISTRY_HOST/image-service:$IMAGE_VERSION
-docker tag frontend:$FRONTEND_VERSION $REGISTRY_HOST/frontend:$FRONTEND_VERSION
+if docker tag api-service:$API_VERSION $REGISTRY_HOST/api-service:$API_VERSION 2>/dev/null && \
+   docker tag auth-service:$AUTH_VERSION $REGISTRY_HOST/auth-service:$AUTH_VERSION 2>/dev/null && \
+   docker tag image-service:$IMAGE_VERSION $REGISTRY_HOST/image-service:$IMAGE_VERSION 2>/dev/null && \
+   docker tag frontend:$FRONTEND_VERSION $REGISTRY_HOST/frontend:$FRONTEND_VERSION 2>/dev/null; then
+    log_success "Images tagged successfully"
+else
+    log_warning "Failed to tag some images, will use local images"
+    SKIP_LOGIN=true
+fi
 
 log_info "Pushing images to registry..."
 
