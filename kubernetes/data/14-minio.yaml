@@ -171,6 +171,10 @@ metadata:
   labels:
     app: minio-init
 spec:
+  # Allow up to 2 retries
+  backoffLimit: 2
+  # Overall job timeout of 20 minutes
+  activeDeadlineSeconds: 1200
   template:
     metadata:
       labels:
@@ -178,7 +182,7 @@ spec:
     spec:
       restartPolicy: OnFailure
       initContainers:
-      # Wait for MinIO to be ready
+      # Wait for MinIO to be ready with better timeout and error handling
       - name: wait-for-minio
         image: curlimages/curl:8.4.0
         command:
@@ -186,11 +190,38 @@ spec:
         - -c
         - |
           echo "Waiting for MinIO to be ready..."
-          until curl -f http://minio-service:9000/minio/health/ready; do
-            echo "MinIO not ready yet, waiting..."
+          attempt=0
+          max_attempts=60  # 10 minutes with 10 second intervals
+          
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -f -m 5 http://minio-service:9000/minio/health/ready 2>/dev/null; then
+              echo "MinIO is ready!"
+              exit 0
+            fi
+            
+            attempt=$((attempt + 1))
+            echo "MinIO not ready yet (attempt $attempt/$max_attempts), waiting..."
+            
+            # Show more detailed status every 30 attempts (5 minutes)
+            if [ $((attempt % 30)) -eq 0 ]; then
+              echo "Extended wait - checking if MinIO service exists..."
+              nslookup minio-service || echo "MinIO service DNS not ready"
+            fi
+            
             sleep 10
           done
-          echo "MinIO is ready!"
+          
+          echo "ERROR: MinIO failed to become ready after $max_attempts attempts"
+          echo "Trying direct connection test..."
+          curl -v http://minio-service:9000/minio/health/ready || true
+          exit 1
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "25m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
       containers:
       - name: mc
         image: minio/mc:RELEASE.2023-11-20T16-30-59Z

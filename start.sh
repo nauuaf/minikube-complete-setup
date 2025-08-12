@@ -464,7 +464,61 @@ health_check "redis" $NAMESPACE_PROD
 health_check "minio" $NAMESPACE_PROD
 
 log_info "Waiting for MinIO bucket initialization..."
-kubectl wait --for=condition=complete job/minio-bucket-init -n $NAMESPACE_PROD --timeout=300s
+# First check if MinIO pod is actually ready
+if ! kubectl wait --for=condition=ready pod -l app=minio -n $NAMESPACE_PROD --timeout=120s; then
+    log_warning "MinIO pod not ready within 2 minutes, checking status..."
+    kubectl get pods -l app=minio -n $NAMESPACE_PROD
+    kubectl describe pods -l app=minio -n $NAMESPACE_PROD
+fi
+
+# Check if bucket initialization job already exists and is running
+if kubectl get job minio-bucket-init -n $NAMESPACE_PROD >/dev/null 2>&1; then
+    job_status=$(kubectl get job minio-bucket-init -n $NAMESPACE_PROD -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+    
+    if [ "$job_status" = "True" ]; then
+        log_success "MinIO bucket initialization already completed"
+    else
+        log_info "MinIO bucket initialization job exists, checking progress..."
+        # Wait for up to 10 minutes with better timeout handling
+        if kubectl wait --for=condition=complete job/minio-bucket-init -n $NAMESPACE_PROD --timeout=600s; then
+            log_success "MinIO bucket initialization completed"
+        else
+            log_warning "MinIO bucket initialization timed out after 10 minutes"
+            log_info "Checking job status and logs..."
+            kubectl get job minio-bucket-init -n $NAMESPACE_PROD
+            kubectl get pods -l app=minio-init -n $NAMESPACE_PROD
+            
+            # Get logs from the job pods
+            job_pods=$(kubectl get pods -l app=minio-init -n $NAMESPACE_PROD --no-headers 2>/dev/null | awk '{print $1}' | head -1)
+            if [ -n "$job_pods" ]; then
+                log_info "MinIO initialization job logs:"
+                kubectl logs "$job_pods" -n $NAMESPACE_PROD --tail=20 || true
+                
+                # Check if this is a timeout in the init container
+                kubectl describe pod "$job_pods" -n $NAMESPACE_PROD | grep -A10 -B5 "wait-for-minio" || true
+            fi
+            
+            # Delete and retry the job once
+            log_info "Retrying MinIO bucket initialization..."
+            kubectl delete job minio-bucket-init -n $NAMESPACE_PROD || true
+            sleep 5
+            
+            # Recreate the job
+            kubectl apply -f kubernetes/data/14-minio.yaml
+            
+            # Wait again with shorter timeout
+            if kubectl wait --for=condition=complete job/minio-bucket-init -n $NAMESPACE_PROD --timeout=300s; then
+                log_success "MinIO bucket initialization completed on retry"
+            else
+                log_warning "MinIO bucket initialization failed again - continuing with deployment"
+                log_warning "You may need to manually initialize buckets later"
+                # Don't fail the entire deployment for this
+            fi
+        fi
+    fi
+else
+    log_warning "MinIO bucket initialization job not found, skipping..."
+fi
 
 # Step 13: Deploy applications
 log_info "Deploying applications..."

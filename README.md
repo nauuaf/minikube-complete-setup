@@ -181,6 +181,10 @@ cd sre-assignment
 # ✅ Deploy all services with monitoring
 # ✅ Configure HTTPS with automatic SSL certificates
 # ✅ Set up ingress for nawaf.thmanyah.com
+# ✅ Initialize MinIO buckets (with automatic retry on failure)
+
+# Note: If MinIO bucket initialization fails, run:
+# ./scripts/manual-minio-init.sh
 ```
 
 #### 3.3 Verify HTTPS Setup
@@ -333,6 +337,21 @@ kubectl logs -n cert-manager deployment/cert-manager
 # Manual certificate request
 kubectl delete certificate sre-platform-tls -n production
 kubectl apply -f kubernetes/security/04-tls-ingress.yaml
+```
+
+### MinIO Bucket Initialization Issues
+
+```plaintext
+# Check MinIO bucket initialization status
+kubectl get job minio-bucket-init -n production
+kubectl logs -l app=minio-init -n production
+
+# Manual bucket initialization (if automated job fails)
+./scripts/manual-minio-init.sh
+
+# Verify MinIO is accessible
+kubectl port-forward -n production svc/minio-service 9000:9000
+# Test: curl http://localhost:9000/minio/health/ready
 ```
 
 ### Service Issues
