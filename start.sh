@@ -166,10 +166,16 @@ log_info "Pushing images to private registry..."
 # Wait for registry to be ready
 kubectl wait --for=condition=ready pod -l app=docker-registry --timeout=300s
 
-# Use direct NodePort access (works natively on Linux)
+# Set up port forwarding for registry access from host
 MINIKUBE_IP=$(minikube ip)
-REGISTRY_URL="http://$MINIKUBE_IP:$REGISTRY_PORT"
-REGISTRY_HOST="$MINIKUBE_IP:$REGISTRY_PORT"
+log_info "Setting up temporary registry port forwarding..."
+kubectl port-forward --address 127.0.0.1 -n default svc/docker-registry 30500:5000 > /tmp/registry-forward.log 2>&1 &
+REGISTRY_FORWARD_PID=$!
+sleep 5
+
+# Use localhost with port forwarding
+REGISTRY_URL="http://localhost:$REGISTRY_PORT"
+REGISTRY_HOST="localhost:$REGISTRY_PORT"
 
 log_info "Testing registry connection at $REGISTRY_URL..."
 # Simple connection test with retry
@@ -199,19 +205,19 @@ NEEDS_RESTART=false
 # Check if we need to add insecure registry
 if [ -f "$DOCKER_DAEMON_JSON" ]; then
     # Check if our registry is already configured
-    if ! grep -q "$REGISTRY_HOST" "$DOCKER_DAEMON_JSON" 2>/dev/null; then
-        log_warning "Adding $REGISTRY_HOST to Docker insecure registries..."
+    if ! grep -q "localhost:$REGISTRY_PORT" "$DOCKER_DAEMON_JSON" 2>/dev/null; then
+        log_warning "Adding localhost:$REGISTRY_PORT to Docker insecure registries..."
         # Backup existing config
         sudo cp "$DOCKER_DAEMON_JSON" "${DOCKER_DAEMON_JSON}.backup"
-        # Add our registry to existing config
-        sudo jq --arg registry "$REGISTRY_HOST" '.["insecure-registries"] += [$registry]' "$DOCKER_DAEMON_JSON" > /tmp/daemon.json
+        # Add localhost registry to existing config
+        sudo jq --arg registry "localhost:$REGISTRY_PORT" '.["insecure-registries"] += [$registry]' "$DOCKER_DAEMON_JSON" > /tmp/daemon.json
         sudo mv /tmp/daemon.json "$DOCKER_DAEMON_JSON"
         NEEDS_RESTART=true
     fi
 else
-    # Create new config with our registry
+    # Create new config with localhost registry
     log_info "Creating Docker daemon configuration..."
-    echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee "$DOCKER_DAEMON_JSON" > /dev/null
+    echo "{\"insecure-registries\": [\"localhost:$REGISTRY_PORT\"]}" | sudo tee "$DOCKER_DAEMON_JSON" > /dev/null
     NEEDS_RESTART=true
 fi
 
@@ -239,12 +245,12 @@ fi
 
 # Verify Docker sees the insecure registry
 log_info "Verifying Docker configuration..."
-if docker info 2>/dev/null | grep -q "$REGISTRY_HOST"; then
-    log_success "Docker configured with insecure registry: $REGISTRY_HOST"
+if docker info 2>/dev/null | grep -q "localhost:$REGISTRY_PORT"; then
+    log_success "Docker configured with insecure registry: localhost:$REGISTRY_PORT"
 else
     log_warning "Docker may not be properly configured, attempting to fix..."
     # Force add to Docker config
-    echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
+    echo "{\"insecure-registries\": [\"localhost:$REGISTRY_PORT\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
     sudo systemctl daemon-reload
     sudo systemctl restart docker
     sleep 5
@@ -410,6 +416,12 @@ fi
 log_info "Verifying registry contents..."
 curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog | jq .
 
+# Clean up temporary registry port forward
+if [ -n "${REGISTRY_FORWARD_PID:-}" ]; then
+    log_info "Cleaning up temporary registry port forward..."
+    kill $REGISTRY_FORWARD_PID 2>/dev/null || true
+fi
+
 # Step 10: Install Ingress Controller and cert-manager for HTTPS
 log_info "Installing NGINX Ingress Controller..."
 
@@ -559,14 +571,36 @@ log_info "Importing Grafana dashboards..."
 sleep 10
 ./scripts/import-dashboards.sh
 
-# Step 16: Run smoke tests
+# Step 16: Fix any remaining service issues
+log_info "Ensuring all services are healthy..."
+
+# Wait a bit more for services to fully start
+log_info "Allowing services time to initialize..."
+sleep 15
+
+# Check and fix service deployments if needed
+log_info "Verifying service deployments..."
+for service in api-service auth-service image-service frontend; do
+    if ! kubectl get deployment $service -n production >/dev/null 2>&1; then
+        log_warning "Service $service deployment not found, checking..."
+    else
+        # Ensure deployment is ready
+        kubectl rollout status deployment/$service -n production --timeout=60s || log_warning "$service deployment may have issues"
+    fi
+done
+
+# Run smoke tests
 log_info "Running smoke tests..."
 ./scripts/health-checks.sh
 
 # Step 17: Enable HTTPS and remote access
 log_info "Enabling HTTPS and remote access..."
 
-# Kill any existing port forwards
+# Fix ingress access for ports 80 and 443
+log_info "Fixing ingress controller access..."
+./scripts/fix-ingress-access.sh
+
+# Kill any existing port forwards and restart properly
 pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 2
 
@@ -592,9 +626,9 @@ sleep 2
 
 echo "Starting port forwards with correct service ports..."
 
-# HTTPS/HTTP for ingress (domain access)
-kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
+# HTTPS/HTTP for ingress (domain access) - using correct service name
+kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
 
 # Direct service access (using correct service ports)
 kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:3000 > /tmp/sre-logs/frontend.log 2>&1 &
@@ -613,12 +647,12 @@ while true; do
     # Check critical forwarding with proper restart
     if ! pgrep -f "port-forward.*:443" > /dev/null; then
         echo "Restarting HTTPS forward..."
-        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
+        kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
     fi
     
     if ! pgrep -f "port-forward.*:80" > /dev/null; then
         echo "Restarting HTTP forward..."
-        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
+        kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
     fi
     
     if ! pgrep -f "port-forward.*30004" > /dev/null; then
