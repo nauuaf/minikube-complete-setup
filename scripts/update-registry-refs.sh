@@ -5,10 +5,13 @@
 
 source config/config.env
 
+# Use the correct registry address for Kubernetes pods
+# From inside the cluster, pods should access the registry service directly
+CLUSTER_REGISTRY_HOST="docker-registry.default.svc.cluster.local:5000"
 MINIKUBE_IP=$(minikube ip)
-REGISTRY_HOST="$MINIKUBE_IP:$REGISTRY_PORT"
+HOST_REGISTRY_HOST="$MINIKUBE_IP:$REGISTRY_PORT"
 
-echo "Updating Kubernetes manifests with registry: $REGISTRY_HOST"
+echo "Updating Kubernetes manifests with cluster registry: $CLUSTER_REGISTRY_HOST"
 
 # Create temporary directory for updated manifests
 mkdir -p /tmp/updated-apps
@@ -31,13 +34,18 @@ if [ "${USE_LOCAL_IMAGES:-false}" = "true" ]; then
     
     sed -e "s|localhost:30500/||g" \
         -e "s|imagePullPolicy: Always|imagePullPolicy: Never|g" \
-        kubernetes/apps/frontend-deployment.yaml > /tmp/updated-apps/frontend-deployment.yaml
+        kubernetes/apps/frontend-deployment.yaml > /tmp/updated-apps/frontend-deployment.yaml 2>/dev/null || \
+    sed -e "s|localhost:30500/||g" \
+        -e "s|imagePullPolicy: Always|imagePullPolicy: Never|g" \
+        kubernetes/apps/04-frontend.yaml > /tmp/updated-apps/04-frontend.yaml 2>/dev/null || true
 else
-    # Update with registry host
-    sed "s|localhost:30500/|$REGISTRY_HOST/|g" kubernetes/apps/05-api-service.yaml > /tmp/updated-apps/05-api-service.yaml
-    sed "s|localhost:30500/|$REGISTRY_HOST/|g" kubernetes/apps/06-auth-service.yaml > /tmp/updated-apps/06-auth-service.yaml
-    sed "s|localhost:30500/|$REGISTRY_HOST/|g" kubernetes/apps/07-image-service.yaml > /tmp/updated-apps/07-image-service.yaml
-    sed "s|localhost:30500/|$REGISTRY_HOST/|g" kubernetes/apps/frontend-deployment.yaml > /tmp/updated-apps/frontend-deployment.yaml
+    # Update with cluster-internal registry host (what pods see)
+    sed "s|localhost:30500/|$CLUSTER_REGISTRY_HOST/|g" kubernetes/apps/05-api-service.yaml > /tmp/updated-apps/05-api-service.yaml
+    sed "s|localhost:30500/|$CLUSTER_REGISTRY_HOST/|g" kubernetes/apps/06-auth-service.yaml > /tmp/updated-apps/06-auth-service.yaml
+    sed "s|localhost:30500/|$CLUSTER_REGISTRY_HOST/|g" kubernetes/apps/07-image-service.yaml > /tmp/updated-apps/07-image-service.yaml
+    
+    # Update frontend deployment
+    sed "s|localhost:30500/|$CLUSTER_REGISTRY_HOST/|g" kubernetes/apps/frontend-deployment.yaml > /tmp/updated-apps/frontend-deployment.yaml
 fi
 
 # Copy other files as-is

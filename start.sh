@@ -348,11 +348,24 @@ fi
 
 # Tag and push images (with error handling)
 log_info "Tagging images for registry..."
-if docker tag api-service:$API_VERSION $REGISTRY_HOST/api-service:$API_VERSION 2>/dev/null && \
-   docker tag auth-service:$AUTH_VERSION $REGISTRY_HOST/auth-service:$AUTH_VERSION 2>/dev/null && \
-   docker tag image-service:$IMAGE_VERSION $REGISTRY_HOST/image-service:$IMAGE_VERSION 2>/dev/null && \
-   docker tag frontend:$FRONTEND_VERSION $REGISTRY_HOST/frontend:$FRONTEND_VERSION 2>/dev/null; then
-    log_success "Images tagged successfully"
+
+# We need to tag with localhost for pushing, but manifests will use cluster DNS
+PUSH_REGISTRY_HOST="localhost:$REGISTRY_PORT"
+CLUSTER_REGISTRY_HOST="docker-registry.default.svc.cluster.local:5000"
+
+if docker tag api-service:$API_VERSION $PUSH_REGISTRY_HOST/api-service:$API_VERSION 2>/dev/null && \
+   docker tag auth-service:$AUTH_VERSION $PUSH_REGISTRY_HOST/auth-service:$AUTH_VERSION 2>/dev/null && \
+   docker tag image-service:$IMAGE_VERSION $PUSH_REGISTRY_HOST/image-service:$IMAGE_VERSION 2>/dev/null && \
+   docker tag frontend:$FRONTEND_VERSION $PUSH_REGISTRY_HOST/frontend:$FRONTEND_VERSION 2>/dev/null; then
+    log_success "Images tagged successfully with $PUSH_REGISTRY_HOST"
+    
+    # Also tag with cluster registry name for manifest updating
+    docker tag api-service:$API_VERSION $CLUSTER_REGISTRY_HOST/api-service:$API_VERSION 2>/dev/null || true
+    docker tag auth-service:$AUTH_VERSION $CLUSTER_REGISTRY_HOST/auth-service:$AUTH_VERSION 2>/dev/null || true
+    docker tag image-service:$IMAGE_VERSION $CLUSTER_REGISTRY_HOST/image-service:$IMAGE_VERSION 2>/dev/null || true
+    docker tag frontend:$FRONTEND_VERSION $CLUSTER_REGISTRY_HOST/frontend:$FRONTEND_VERSION 2>/dev/null || true
+    
+    log_info "Images also tagged with cluster DNS: $CLUSTER_REGISTRY_HOST"
 else
     log_warning "Failed to tag some images, will use local images"
     SKIP_LOGIN=true
@@ -383,14 +396,16 @@ push_image() {
 # Push all images (skip if login failed)
 if [ "$SKIP_LOGIN" != "true" ]; then
     PUSH_FAILED=false
-    push_image "$REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
-    push_image "$REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
-    push_image "$REGISTRY_HOST/image-service:$IMAGE_VERSION" || PUSH_FAILED=true
-    push_image "$REGISTRY_HOST/frontend:$FRONTEND_VERSION" || PUSH_FAILED=true
+    push_image "$PUSH_REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
+    push_image "$PUSH_REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
+    push_image "$PUSH_REGISTRY_HOST/image-service:$IMAGE_VERSION" || PUSH_FAILED=true
+    push_image "$PUSH_REGISTRY_HOST/frontend:$FRONTEND_VERSION" || PUSH_FAILED=true
 
     if [ "$PUSH_FAILED" = true ]; then
         log_warning "Some images failed to push, but continuing with deployment..."
         log_warning "Services will try to pull from registry during deployment"
+        # If push fails, fall back to local images
+        export USE_LOCAL_IMAGES=true
     else
         log_success "All images pushed to registry successfully"
     fi
@@ -409,7 +424,14 @@ else
     docker build -t image-service:$IMAGE_VERSION ./services/image-service/ || log_warning "Failed to build image-service"
     docker build -t frontend:$FRONTEND_VERSION ./services/frontend/ || log_warning "Failed to build frontend"
     
+    # Also tag with cluster registry name in Minikube's docker
+    docker tag api-service:$API_VERSION $CLUSTER_REGISTRY_HOST/api-service:$API_VERSION || true
+    docker tag auth-service:$AUTH_VERSION $CLUSTER_REGISTRY_HOST/auth-service:$AUTH_VERSION || true
+    docker tag image-service:$IMAGE_VERSION $CLUSTER_REGISTRY_HOST/image-service:$IMAGE_VERSION || true
+    docker tag frontend:$FRONTEND_VERSION $CLUSTER_REGISTRY_HOST/frontend:$FRONTEND_VERSION || true
+    
     log_success "Images built in Minikube's Docker daemon"
+    export USE_LOCAL_IMAGES=true
 fi
 
 # Verify registry contents
@@ -614,58 +636,106 @@ chmod 755 /tmp/sre-logs
 
 echo "Starting comprehensive port forwarding..."
 
-# Wait for ingress controller
-while ! kubectl get pods -n ingress-nginx | grep -q "Running"; do
-    echo "Waiting for ingress controller..."
+# Function to start port forward with retry
+start_port_forward() {
+    local service_name=$1
+    local namespace=$2
+    local local_port=$3
+    local service_port=$4
+    local log_file=$5
+    local description=$6
+    
+    echo "Starting $description ($service_name:$service_port -> $local_port)..."
+    
+    # Kill any existing process on this port
+    pkill -f "port-forward.*:$local_port" 2>/dev/null || true
+    sleep 1
+    
+    # Start the port forward
+    kubectl port-forward --address 0.0.0.0 -n $namespace svc/$service_name $local_port:$service_port > $log_file 2>&1 &
+    local pid=$!
+    
+    # Give it a moment to start
+    sleep 2
+    
+    # Check if it's running
+    if kill -0 $pid 2>/dev/null; then
+        echo "✅ $description started successfully (PID: $pid)"
+        return 0
+    else
+        echo "❌ $description failed to start"
+        return 1
+    fi
+}
+
+# Wait for ingress controller to be ready
+echo "Waiting for ingress controller..."
+while ! kubectl get pods -n ingress-nginx | grep -q "Running.*1/1"; do
+    echo "Ingress controller not ready, waiting..."
     sleep 5
 done
 
-# Kill any existing forwards
+# Get the correct ingress service name
+INGRESS_SVC=$(kubectl get svc -n ingress-nginx --no-headers | grep controller | awk '{print $1}' | head -1)
+if [ -z "$INGRESS_SVC" ]; then
+    echo "ERROR: No ingress controller service found"
+    INGRESS_SVC="ingress-nginx-controller"  # fallback
+fi
+
+echo "Using ingress service: $INGRESS_SVC"
+
+# Kill any existing port forwards
 pkill -f "port-forward" 2>/dev/null || true
 sleep 2
 
-echo "Starting port forwards with correct service ports..."
+echo "Starting port forwards..."
 
-# HTTPS/HTTP for ingress (domain access) - using correct service name
-kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
+# Critical HTTP/HTTPS forwards
+start_port_forward "$INGRESS_SVC" "ingress-nginx" "80" "80" "/tmp/sre-logs/http.log" "HTTP Ingress"
+start_port_forward "$INGRESS_SVC" "ingress-nginx" "443" "443" "/tmp/sre-logs/https.log" "HTTPS Ingress"
 
-# Direct service access (using correct service ports)
-kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:3000 > /tmp/sre-logs/frontend.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /tmp/sre-logs/grafana.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /tmp/sre-logs/prometheus.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n default svc/registry-ui 30501:80 > /tmp/sre-logs/registry-ui.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30900:9000 > /tmp/sre-logs/minio-api.log 2>&1 &
-kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30901:9001 > /tmp/sre-logs/minio-console.log 2>&1 &
+# Application services
+start_port_forward "frontend" "production" "30004" "3000" "/tmp/sre-logs/frontend.log" "Frontend"
 
-echo "All port forwards started"
+# Monitoring services
+start_port_forward "grafana" "monitoring" "30030" "3000" "/tmp/sre-logs/grafana.log" "Grafana"
+start_port_forward "prometheus" "monitoring" "30090" "9090" "/tmp/sre-logs/prometheus.log" "Prometheus"
+
+# Registry and storage (optional)
+start_port_forward "registry-ui" "default" "30501" "80" "/tmp/sre-logs/registry-ui.log" "Registry UI" || true
+start_port_forward "minio-nodeport" "production" "30900" "9000" "/tmp/sre-logs/minio-api.log" "MinIO API" || true
+start_port_forward "minio-nodeport" "production" "30901" "9001" "/tmp/sre-logs/minio-console.log" "MinIO Console" || true
+
+echo "All critical port forwards started"
 
 # Monitor and restart if needed
 while true; do
     sleep 30
     
-    # Check critical forwarding with proper restart
-    if ! pgrep -f "port-forward.*:443" > /dev/null; then
-        echo "Restarting HTTPS forward..."
-        kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 443:443 > /tmp/sre-logs/https.log 2>&1 &
+    # Check and restart critical services
+    if ! pgrep -f "port-forward.*:80" > /dev/null; then
+        echo "$(date): Restarting HTTP forward..."
+        start_port_forward "$INGRESS_SVC" "ingress-nginx" "80" "80" "/tmp/sre-logs/http.log" "HTTP Ingress"
     fi
     
-    if ! pgrep -f "port-forward.*:80" > /dev/null; then
-        echo "Restarting HTTP forward..."
-        kubectl port-forward --address 0.0.0.0 -n ingress-nginx service/ingress-nginx-controller 80:80 > /tmp/sre-logs/http.log 2>&1 &
+    if ! pgrep -f "port-forward.*:443" > /dev/null; then
+        echo "$(date): Restarting HTTPS forward..."
+        start_port_forward "$INGRESS_SVC" "ingress-nginx" "443" "443" "/tmp/sre-logs/https.log" "HTTPS Ingress"
     fi
     
     if ! pgrep -f "port-forward.*30004" > /dev/null; then
-        echo "Restarting frontend forward..."
-        kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:3000 > /tmp/sre-logs/frontend.log 2>&1 &
+        echo "$(date): Restarting frontend forward..."
+        start_port_forward "frontend" "production" "30004" "3000" "/tmp/sre-logs/frontend.log" "Frontend"
     fi
+    
     if ! pgrep -f "port-forward.*30030" > /dev/null; then
-        echo "Restarting Grafana forward..."
-        kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /tmp/sre-logs/grafana.log 2>&1 &
+        echo "$(date): Restarting Grafana forward..."
+        start_port_forward "grafana" "monitoring" "30030" "3000" "/tmp/sre-logs/grafana.log" "Grafana"
     fi
+    
     if ! pgrep -f "port-forward.*30090" > /dev/null; then
-        echo "Restarting Prometheus forward..."
-        kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /tmp/sre-logs/prometheus.log 2>&1 &
+        echo "$(date): Restarting Prometheus forward..."
+        start_port_forward "prometheus" "monitoring" "30090" "9090" "/tmp/sre-logs/prometheus.log" "Prometheus"
     fi
 done
 EOF
@@ -736,7 +806,7 @@ echo -e "\n${GREEN}========================================${NC}"
 # Step 19: Final verification
 log_info "Running final verification..."
 sleep 5
-./scripts/verify-access.sh
+./scripts/verify-deployment.sh
 
 echo -e "${GREEN}✅ Setup Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
