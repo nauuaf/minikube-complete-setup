@@ -218,6 +218,7 @@ fi
 # Restart Docker if configuration changed
 if [ "$NEEDS_RESTART" = true ]; then
     log_info "Restarting Docker daemon to apply configuration..."
+    sudo systemctl daemon-reload
     sudo systemctl restart docker
     sleep 5
     # Wait for Docker to be ready
