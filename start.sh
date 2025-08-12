@@ -392,13 +392,18 @@ else
     log_warning "Skipping image push due to registry login failure"
     log_info "Loading images directly into Minikube instead..."
     
-    # Load images directly into Minikube as fallback
-    minikube image load api-service:$API_VERSION
-    minikube image load auth-service:$AUTH_VERSION
-    minikube image load image-service:$IMAGE_VERSION
-    minikube image load frontend:$FRONTEND_VERSION
+    # Since Minikube uses Docker driver, we need to push to Minikube's Docker daemon
+    log_info "Configuring Docker to use Minikube's daemon..."
+    eval $(minikube docker-env)
     
-    log_success "Images loaded directly into Minikube"
+    # Rebuild images in Minikube's Docker daemon
+    log_info "Building images in Minikube's Docker environment..."
+    docker build -t api-service:$API_VERSION ./services/api-service/ || log_warning "Failed to build api-service"
+    docker build -t auth-service:$AUTH_VERSION ./services/auth-service/ || log_warning "Failed to build auth-service"
+    docker build -t image-service:$IMAGE_VERSION ./services/image-service/ || log_warning "Failed to build image-service"
+    docker build -t frontend:$FRONTEND_VERSION ./services/frontend/ || log_warning "Failed to build frontend"
+    
+    log_success "Images built in Minikube's Docker daemon"
 fi
 
 # Verify registry contents
@@ -407,12 +412,23 @@ curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog | jq .
 
 # Step 10: Install Ingress Controller and cert-manager for HTTPS
 log_info "Installing NGINX Ingress Controller..."
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+
+# Delete old ingress jobs if they exist (to avoid conflicts)
+kubectl delete job ingress-nginx-admission-create -n ingress-nginx 2>/dev/null || true
+kubectl delete job ingress-nginx-admission-patch -n ingress-nginx 2>/dev/null || true
+
+# For Minikube, use the built-in ingress addon instead
+if minikube addons list | grep -q "ingress.*enabled"; then
+    log_info "Ingress addon already enabled in Minikube"
+else
+    log_info "Enabling Minikube ingress addon..."
+    minikube addons enable ingress
+fi
 
 log_info "Waiting for Ingress Controller to be ready..."
 kubectl wait --namespace ingress-nginx \
   --for=condition=ready pod \
-  --selector=app.kubernetes.io/component=controller \
+  --selector=app.kubernetes.io/name=ingress-nginx \
   --timeout=300s || log_warning "Ingress controller taking longer than expected"
 
 log_info "Installing cert-manager for Let's Encrypt certificates..."
@@ -454,6 +470,9 @@ kubectl wait --for=condition=complete job/minio-bucket-init -n $NAMESPACE_PROD -
 log_info "Deploying applications..."
 
 # Update manifests with correct registry references
+if [ "$SKIP_LOGIN" = "true" ]; then
+    export USE_LOCAL_IMAGES=true
+fi
 ./scripts/update-registry-refs.sh
 
 # Deploy applications (they will pull from registry)
