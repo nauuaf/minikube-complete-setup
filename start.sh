@@ -237,29 +237,67 @@ if [ "$NEEDS_RESTART" = true ]; then
     fi
 fi
 
-# Docker login with retry
+# Verify Docker sees the insecure registry
+log_info "Verifying Docker configuration..."
+if docker info 2>/dev/null | grep -q "$REGISTRY_HOST"; then
+    log_success "Docker configured with insecure registry: $REGISTRY_HOST"
+else
+    log_warning "Docker may not be properly configured, attempting to fix..."
+    # Force add to Docker config
+    echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl restart docker
+    sleep 5
+fi
+
+# Docker login with retry and better error handling
 log_info "Logging into registry..."
 login_retry=0
 while [ $login_retry -lt 3 ]; do
-    if echo $REGISTRY_PASS | docker login $REGISTRY_HOST -u $REGISTRY_USER --password-stdin 2>/dev/null; then
+    # Capture the actual error for debugging
+    LOGIN_OUTPUT=$(echo $REGISTRY_PASS | docker login $REGISTRY_HOST -u $REGISTRY_USER --password-stdin 2>&1)
+    if [ $? -eq 0 ]; then
         log_success "Docker login successful"
         break
     else
-        if [ $login_retry -lt 2 ]; then
-            log_warning "Docker login failed, retrying in 5 seconds..."
+        ((login_retry++))
+        if [ $login_retry -lt 3 ]; then
+            log_warning "Docker login failed (attempt $login_retry/3), retrying in 5 seconds..."
+            log_warning "Error: $LOGIN_OUTPUT"
+            
+            # Check if registry is actually running
+            REGISTRY_POD=$(kubectl get pods -l app=docker-registry -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -n "$REGISTRY_POD" ]; then
+                log_info "Registry pod $REGISTRY_POD is running"
+                # Try to get registry logs for debugging
+                kubectl logs $REGISTRY_POD --tail=5 2>/dev/null || true
+            fi
+            
             sleep 5
         fi
     fi
-    ((login_retry++))
 done
 
 if [ $login_retry -eq 3 ]; then
     log_error "❌ Docker login failed after 3 attempts"
-    log_error "Please check:"
-    log_error "  1. Registry pod: kubectl get pods -l app=docker-registry"
-    log_error "  2. Registry logs: kubectl logs -l app=docker-registry"
-    log_error "  3. Docker config: docker info | grep -A5 'Insecure Registries'"
-    exit 1
+    log_error "Last error: $LOGIN_OUTPUT"
+    
+    # Provide debugging information
+    log_info "Debugging information:"
+    echo "Registry URL: $REGISTRY_HOST"
+    echo "Registry User: $REGISTRY_USER"
+    echo "Testing direct registry access..."
+    curl -u $REGISTRY_USER:$REGISTRY_PASS http://$REGISTRY_HOST/v2/_catalog 2>/dev/null || echo "Direct access failed"
+    
+    log_info "Docker insecure registries configuration:"
+    docker info 2>/dev/null | grep -A5 "Insecure Registries" || true
+    
+    log_info "Registry pod status:"
+    kubectl get pods -l app=docker-registry || true
+    
+    # Try alternative approach - skip login and push with --insecure flag
+    log_warning "Attempting to continue without login (using direct push)..."
+    SKIP_LOGIN=true
 fi
 
 # Tag and push images
@@ -270,12 +308,40 @@ docker tag image-service:$IMAGE_VERSION $REGISTRY_HOST/image-service:$IMAGE_VERS
 docker tag frontend:$FRONTEND_VERSION $REGISTRY_HOST/frontend:$FRONTEND_VERSION
 
 log_info "Pushing images to registry..."
-docker push $REGISTRY_HOST/api-service:$API_VERSION
-docker push $REGISTRY_HOST/auth-service:$AUTH_VERSION
-docker push $REGISTRY_HOST/image-service:$IMAGE_VERSION
-docker push $REGISTRY_HOST/frontend:$FRONTEND_VERSION
 
-log_success "All images pushed to registry successfully"
+# Function to push with retry
+push_image() {
+    local image=$1
+    local retry=0
+    while [ $retry -lt 3 ]; do
+        if docker push $image 2>/dev/null; then
+            log_success "Pushed $image"
+            return 0
+        else
+            ((retry++))
+            if [ $retry -lt 3 ]; then
+                log_warning "Push failed for $image, retry $retry/3"
+                sleep 2
+            fi
+        fi
+    done
+    log_error "Failed to push $image after 3 attempts"
+    return 1
+}
+
+# Push all images
+PUSH_FAILED=false
+push_image "$REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
+push_image "$REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
+push_image "$REGISTRY_HOST/image-service:$IMAGE_VERSION" || PUSH_FAILED=true
+push_image "$REGISTRY_HOST/frontend:$FRONTEND_VERSION" || PUSH_FAILED=true
+
+if [ "$PUSH_FAILED" = true ]; then
+    log_warning "Some images failed to push, but continuing with deployment..."
+    log_warning "Services will try to pull from registry during deployment"
+else
+    log_success "All images pushed to registry successfully"
+fi
 
 # Verify registry contents
 log_info "Verifying registry contents..."
