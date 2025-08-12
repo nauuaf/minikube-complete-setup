@@ -174,6 +174,7 @@ cd sre-assignment
 
 # The script will automatically:
 # ✅ Start Minikube cluster
+# ✅ Configure Docker for insecure registry (fixes login issues)
 # ✅ Build and push all service images  
 # ✅ Install NGINX Ingress Controller
 # ✅ Install cert-manager for Let's Encrypt

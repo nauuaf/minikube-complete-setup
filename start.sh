@@ -191,12 +191,73 @@ if [ $retry_count -eq 30 ]; then
     exit 1
 fi
 
-# Docker login
-log_info "Logging into registry..."
-if echo $REGISTRY_PASS | docker login $REGISTRY_HOST -u $REGISTRY_USER --password-stdin 2>/dev/null; then
-    log_success "Docker login successful"
+# Configure Docker for insecure registry (required for HTTP registries)
+log_info "Configuring Docker for insecure registry..."
+DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
+NEEDS_RESTART=false
+
+# Check if we need to add insecure registry
+if [ -f "$DOCKER_DAEMON_JSON" ]; then
+    # Check if our registry is already configured
+    if ! grep -q "$REGISTRY_HOST" "$DOCKER_DAEMON_JSON" 2>/dev/null; then
+        log_warning "Adding $REGISTRY_HOST to Docker insecure registries..."
+        # Backup existing config
+        sudo cp "$DOCKER_DAEMON_JSON" "${DOCKER_DAEMON_JSON}.backup"
+        # Add our registry to existing config
+        sudo jq --arg registry "$REGISTRY_HOST" '.["insecure-registries"] += [$registry]' "$DOCKER_DAEMON_JSON" > /tmp/daemon.json
+        sudo mv /tmp/daemon.json "$DOCKER_DAEMON_JSON"
+        NEEDS_RESTART=true
+    fi
 else
-    log_error "❌ Docker login failed"
+    # Create new config with our registry
+    log_info "Creating Docker daemon configuration..."
+    echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee "$DOCKER_DAEMON_JSON" > /dev/null
+    NEEDS_RESTART=true
+fi
+
+# Restart Docker if configuration changed
+if [ "$NEEDS_RESTART" = true ]; then
+    log_info "Restarting Docker daemon to apply configuration..."
+    sudo systemctl restart docker
+    sleep 5
+    # Wait for Docker to be ready
+    retry_count=0
+    while [ $retry_count -lt 10 ]; do
+        if docker info > /dev/null 2>&1; then
+            log_success "Docker daemon restarted successfully"
+            break
+        fi
+        sleep 2
+        ((retry_count++))
+    done
+    if [ $retry_count -eq 10 ]; then
+        log_error "Docker daemon failed to restart properly"
+        exit 1
+    fi
+fi
+
+# Docker login with retry
+log_info "Logging into registry..."
+login_retry=0
+while [ $login_retry -lt 3 ]; do
+    if echo $REGISTRY_PASS | docker login $REGISTRY_HOST -u $REGISTRY_USER --password-stdin 2>/dev/null; then
+        log_success "Docker login successful"
+        break
+    else
+        if [ $login_retry -lt 2 ]; then
+            log_warning "Docker login failed, retrying in 5 seconds..."
+            sleep 5
+        fi
+    fi
+    ((login_retry++))
+done
+
+if [ $login_retry -eq 3 ]; then
+    log_error "❌ Docker login failed after 3 attempts"
+    log_error "Please check:"
+    log_error "  1. Registry pod: kubectl get pods -l app=docker-registry"
+    log_error "  2. Registry logs: kubectl logs -l app=docker-registry"
+    log_error "  3. Docker config: docker info | grep -A5 'Insecure Registries'"
     exit 1
 fi
 
