@@ -177,6 +177,10 @@ sleep 5
 REGISTRY_URL="http://localhost:$REGISTRY_PORT"
 REGISTRY_HOST="localhost:$REGISTRY_PORT"
 
+# Export for use in later sections
+export REGISTRY_URL
+export REGISTRY_HOST
+
 log_info "Testing registry connection at $REGISTRY_URL..."
 # Simple connection test with retry
 retry_count=0
@@ -462,9 +466,13 @@ else
     export USE_LOCAL_IMAGES=true
 fi
 
-# Verify registry contents
-log_info "Verifying registry contents..."
-curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog | jq .
+# Verify registry contents (only if registry is being used)
+if [ "$SKIP_LOGIN" != "true" ] && [ -n "${REGISTRY_URL:-}" ]; then
+    log_info "Verifying registry contents..."
+    curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog 2>/dev/null | jq . || log_warning "Could not verify registry contents"
+else
+    log_info "Using local images - skipping registry verification"
+fi
 
 # Clean up temporary registry port forward
 if [ -n "${REGISTRY_FORWARD_PID:-}" ]; then
