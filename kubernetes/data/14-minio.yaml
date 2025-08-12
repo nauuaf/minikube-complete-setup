@@ -86,7 +86,7 @@ spec:
               name: storage-credentials
               key: s3-region
         - name: MINIO_BROWSER_REDIRECT_URL
-          value: "http://$(minikube ip):30900"
+          value: "http://192.168.49.2:30900"
         volumeMounts:
         - name: minio-storage
           mountPath: /data
