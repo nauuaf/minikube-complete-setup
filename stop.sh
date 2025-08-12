@@ -18,12 +18,15 @@ if minikube status >/dev/null 2>&1; then
     echo "Stopping port forwarding..."
     pkill -f "kubectl port-forward" 2>/dev/null || true
     
-    # Stop the systemd service if it exists
-    if systemctl list-units --full -all | grep -Fq "minikube-expose.service"; then
-        echo "Stopping minikube-expose service..."
-        sudo systemctl stop minikube-expose.service 2>/dev/null || true
-        sudo systemctl disable minikube-expose.service 2>/dev/null || true
-    fi
+    # Stop all systemd services created by start.sh
+    echo "Stopping systemd services..."
+    for service in sre-platform-forward minikube-expose minikube-remote-access https-forward complete-forward; do
+        if systemctl list-units --full -all | grep -Fq "${service}.service"; then
+            echo "  Stopping ${service} service..."
+            sudo systemctl stop ${service}.service 2>/dev/null || true
+            sudo systemctl disable ${service}.service 2>/dev/null || true
+        fi
+    done
     
     # Kill any minikube tunnel processes
     pkill -f "minikube tunnel" 2>/dev/null || true
@@ -64,13 +67,23 @@ if [[ "${1:-}" == "--delete-cluster" ]]; then
     echo "Deleting Minikube cluster..."
     minikube delete
     
-    # Also remove the systemd service files if doing complete cleanup
-    if [ -f /etc/systemd/system/minikube-expose.service ]; then
-        echo "Removing minikube-expose service..."
-        sudo rm -f /etc/systemd/system/minikube-expose.service
-        sudo rm -f /usr/local/bin/minikube-expose.sh
-        sudo systemctl daemon-reload
-    fi
+    # Remove all systemd service files created by start.sh
+    echo "Removing systemd service files..."
+    for service in sre-platform-forward minikube-expose minikube-remote-access https-forward complete-forward; do
+        if [ -f "/etc/systemd/system/${service}.service" ]; then
+            echo "  Removing ${service} service files..."
+            sudo rm -f "/etc/systemd/system/${service}.service"
+            sudo rm -f "/usr/local/bin/${service}.sh" 2>/dev/null || true
+        fi
+    done
+    
+    # Clean up port forwarding scripts
+    sudo rm -f /usr/local/bin/sre-platform-forward.sh 2>/dev/null || true
+    sudo rm -f /usr/local/bin/minikube-expose.sh 2>/dev/null || true
+    sudo rm -f /usr/local/bin/https-forward.sh 2>/dev/null || true
+    sudo rm -f /usr/local/bin/complete-forward.sh 2>/dev/null || true
+    
+    sudo systemctl daemon-reload
     
     echo -e "${GREEN}✓ Minikube cluster deleted${NC}"
 else

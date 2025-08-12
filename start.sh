@@ -563,7 +563,133 @@ sleep 10
 log_info "Running smoke tests..."
 ./scripts/health-checks.sh
 
-# Step 17: Display access information
+# Step 17: Enable HTTPS and remote access
+log_info "Enabling HTTPS and remote access..."
+
+# Kill any existing port forwards
+pkill -f "kubectl port-forward" 2>/dev/null || true
+sleep 2
+
+# Create comprehensive port forwarding script
+cat > /tmp/complete-forward.sh << 'EOF'
+#!/bin/bash
+
+echo "Starting comprehensive port forwarding..."
+
+# Wait for ingress controller
+while ! kubectl get pods -n ingress-nginx | grep -q "Running"; do
+    echo "Waiting for ingress controller..."
+    sleep 5
+done
+
+# Kill any existing forwards
+pkill -f "port-forward" 2>/dev/null || true
+sleep 2
+
+# HTTPS/HTTP for ingress (REQUIRED FOR DOMAIN ACCESS)
+kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /var/log/http.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /var/log/https.log 2>&1 &
+
+# Direct service access (NodePort alternatives)
+kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:80 > /var/log/frontend.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /var/log/grafana.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /var/log/prometheus.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n default svc/registry-ui 30501:80 > /var/log/registry-ui.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30900:9000 > /var/log/minio-api.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n production svc/minio-nodeport 30901:9001 > /var/log/minio-console.log 2>&1 &
+
+echo "All port forwards started"
+
+# Monitor and restart if needed
+while true; do
+    sleep 30
+    
+    # Check critical HTTPS forwarding
+    if ! pgrep -f "port-forward.*:443" > /dev/null; then
+        echo "Restarting HTTPS forward..."
+        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 443:443 > /var/log/https.log 2>&1 &
+    fi
+    
+    if ! pgrep -f "port-forward.*:80" > /dev/null; then
+        echo "Restarting HTTP forward..."
+        kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/ingress-nginx-controller 80:80 > /var/log/http.log 2>&1 &
+    fi
+    
+    # Check other services
+    if ! pgrep -f "port-forward.*30004" > /dev/null; then
+        kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:80 > /var/log/frontend.log 2>&1 &
+    fi
+    if ! pgrep -f "port-forward.*30030" > /dev/null; then
+        kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /var/log/grafana.log 2>&1 &
+    fi
+    if ! pgrep -f "port-forward.*30090" > /dev/null; then
+        kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /var/log/prometheus.log 2>&1 &
+    fi
+done
+EOF
+
+# Install as systemd service
+sudo cp /tmp/complete-forward.sh /usr/local/bin/sre-platform-forward.sh
+sudo chmod +x /usr/local/bin/sre-platform-forward.sh
+
+cat > /tmp/sre-platform-forward.service << EOF
+[Unit]
+Description=SRE Platform Port Forwarding Service
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=$USER
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="HOME=/home/$USER"
+Environment="KUBECONFIG=/home/$USER/.kube/config"
+ExecStart=/usr/local/bin/sre-platform-forward.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo cp /tmp/sre-platform-forward.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable sre-platform-forward.service
+sudo systemctl restart sre-platform-forward.service
+
+log_success "HTTPS and remote access enabled"
+
+# Configure firewall
+log_info "Configuring firewall for remote access..."
+if command -v ufw >/dev/null 2>&1; then
+    sudo ufw allow 80/tcp comment "HTTP" 2>/dev/null || true
+    sudo ufw allow 443/tcp comment "HTTPS" 2>/dev/null || true
+    sudo ufw allow 30000:32767/tcp comment "Kubernetes NodePorts" 2>/dev/null || true
+    log_success "Firewall configured for remote access"
+else
+    # For systems without UFW, ensure iptables allows the ports
+    sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    sudo iptables -I INPUT -p tcp --dport 30000:32767 -j ACCEPT 2>/dev/null || true
+fi
+
+# Wait for port forwards to establish
+sleep 10
+
+# Verify ports are listening
+log_info "Verifying remote access ports..."
+for port in 80 443 30004 30030 30090; do
+    if netstat -tlnp 2>/dev/null | grep -q ":$port.*0.0.0.0"; then
+        log_success "Port $port is accessible"
+    else
+        log_warning "Port $port may not be accessible yet"
+    fi
+done
+
+# Get public IP for display
+PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s http://ipinfo.io/ip || hostname -I | awk '{print $1}')
+
+# Step 18: Display access information
 echo -e "\n${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ Setup Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -590,24 +716,25 @@ echo "  - API: https://nawaf.thmanyah.com/api"
 echo "  - Auth: https://nawaf.thmanyah.com/auth"
 echo "  - Images: https://nawaf.thmanyah.com/image"
 echo ""
-echo "Note: DNS A record must point nawaf.thmanyah.com to $MINIKUBE_IP"
+echo "Note: DNS A record must point nawaf.thmanyah.com to ${GREEN}$PUBLIC_IP${NC}"
+echo "Port 443 is now accessible from external machines!"
 echo "Certificate Status: kubectl get certificate -n production"
 
-echo -e "\n${YELLOW}🚀 Services (Direct NodePort Access):${NC}"
-echo "Frontend (Public): http://$MINIKUBE_IP:$FRONTEND_NODEPORT"
-echo "API Service: ClusterIP only (accessible via frontend)"
-echo "Auth Service: ClusterIP only (accessible via frontend)"  
-echo "Image Service: ClusterIP only (accessible via frontend)"
+echo -e "\n${YELLOW}🚀 Services (Remote Access via Public IP):${NC}"
+echo "Frontend: http://$PUBLIC_IP:30004"
+echo "API Service: Accessible via https://nawaf.thmanyah.com/api"
+echo "Auth Service: Accessible via https://nawaf.thmanyah.com/auth"  
+echo "Image Service: Accessible via https://nawaf.thmanyah.com/image"
 
-echo -e "\n${YELLOW}📊 Monitoring:${NC}"
-echo "Prometheus: http://$MINIKUBE_IP:$PROMETHEUS_NODEPORT"
-echo "Grafana: http://$MINIKUBE_IP:$GRAFANA_NODEPORT"
+echo -e "\n${YELLOW}📊 Monitoring (Remote Access):${NC}"
+echo "Prometheus: http://$PUBLIC_IP:30090"
+echo "Grafana: http://$PUBLIC_IP:30030"
 echo "  Username: admin / Password: $GRAFANA_ADMIN_PASSWORD"
 
 echo -e "\n${YELLOW}🌐 Ingress (with TLS):${NC}"
 INGRESS_IP=$(kubectl get ingress -n $NAMESPACE_PROD services-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
 echo "Ingress IP: $INGRESS_IP"
-echo "Add to /etc/hosts: $INGRESS_IP sre-assignment.local"
+echo "Ingress configured for: nawaf.thmanyah.com (requires DNS A record)"
 
 echo -e "\n${YELLOW}📋 Management Commands:${NC}"
 echo "1. Run tests: ./test-scenarios.sh"
