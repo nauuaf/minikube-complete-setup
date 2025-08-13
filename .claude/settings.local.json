@@ -36,7 +36,21 @@
       "Bash(rm:*)",
       "Bash(kubectl patch:*)",
       "Bash(./scripts/use-local-images.sh:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Bash(docker:*)",
+      "Bash(systemctl status:*)",
+      "Bash(cat:*)",
+      "Bash(sudo ls:*)",
+      "Bash(sudo:*)",
+      "Bash(./test-start-script.sh:*)",
+      "Bash(./scripts/fix-image-pull.sh:*)",
+      "Bash(./scripts/fix-ingress-for-http.sh:*)",
+      "Bash(./test-deployment.sh:*)",
+      "Bash(nslookup:*)",
+      "Bash(./scripts/fix-dns-issues.sh:*)",
+      "Bash(./scripts/fix-job-health-checks.sh:*)",
+      "Bash(kubectl rollout status:*)",
+      "Bash(kubectl set image:*)"
     ],
     "deny": []
   }

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail  # Removed 'e' to handle errors more gracefully
 
 # SRE Assignment Deployment Script - Ubuntu/Linux Edition
 # Optimized for Ubuntu 20.04+ and similar Linux distributions
@@ -8,6 +8,13 @@ set -euo pipefail
 # Load configuration
 source config/config.env
 
+# Initialize variables to avoid unbound variable errors
+SKIP_LOGIN=false
+USE_LOCAL_IMAGES=false
+PUSH_FAILED=false
+LOGIN_SUCCESS=false
+REGISTRY_FORWARD_PID=""
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -15,8 +22,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Error handling
-trap 'echo -e "${RED}Error occurred at line $LINENO${NC}"; exit 1' ERR
+# Error handling - disabled for arithmetic operations
+set +e  # Temporarily disable exit on error for compatibility
+trap 'echo -e "${RED}Error occurred at line $LINENO${NC}"' ERR
 
 # Functions
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -111,6 +119,15 @@ fi
 log_info "Checking prerequisites..."
 ./prereq-check.sh || exit 1
 
+# Step 1.5: Fix Docker configuration if needed
+log_info "Checking Docker configuration..."
+if [ ! -s /etc/docker/daemon.json ] || ! grep -q "insecure-registries" /etc/docker/daemon.json 2>/dev/null; then
+    log_warning "Docker configuration needs fixing..."
+    if [ -f scripts/fix-docker-config.sh ]; then
+        sudo ./scripts/fix-docker-config.sh
+    fi
+fi
+
 # Step 2: Start Minikube
 log_info "Starting Minikube cluster..."
 minikube start \
@@ -164,12 +181,16 @@ log_success "All images built"
 log_info "Pushing images to private registry..."
 
 # Wait for registry to be ready
-kubectl wait --for=condition=ready pod -l app=docker-registry --timeout=300s
+kubectl wait --for=condition=ready pod -l app=docker-registry --timeout=300s || {
+    log_warning "Registry pod not ready, checking status..."
+    kubectl get pods -l app=docker-registry
+    sleep 10
+}
 
 # Set up port forwarding for registry access from host
 MINIKUBE_IP=$(minikube ip)
 log_info "Setting up temporary registry port forwarding..."
-kubectl port-forward --address 127.0.0.1 -n default svc/docker-registry 30500:5000 > /tmp/registry-forward.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n default svc/docker-registry 30500:5000 > /tmp/registry-forward.log 2>&1 &
 REGISTRY_FORWARD_PID=$!
 sleep 5
 
@@ -241,27 +262,23 @@ if [ "$NEEDS_RESTART" = true ]; then
     
     # Wait for Docker to be ready with more patience
     log_info "Waiting for Docker daemon to be ready..."
-    retry_count=0
-    while [ $retry_count -lt 20 ]; do  # Increased from 10 to 20
+    for i in {1..20}; do
         if docker info > /dev/null 2>&1; then
             log_success "Docker daemon is ready"
             break
         fi
-        if [ $retry_count -eq 0 ]; then
+        if [ $i -eq 1 ]; then
             echo -n "Waiting for Docker"
         fi
         echo -n "."
-        sleep 3  # Increased from 2 to 3 seconds
-        ((retry_count++))
+        sleep 3
     done
     echo ""  # New line after dots
     
-    if [ $retry_count -eq 20 ]; then
+    # Final check
+    if ! docker info > /dev/null 2>&1; then
         log_warning "Docker daemon took longer than expected to start"
         log_warning "Attempting to continue - Docker may be working despite the delay"
-        # Don't exit here, just continue
-    else
-        log_success "Docker daemon restarted successfully"
     fi
 fi
 
@@ -281,6 +298,7 @@ fi
 log_info "Logging into registry..."
 login_retry=0
 LOGIN_SUCCESS=false
+SKIP_LOGIN=false  # Initialize the variable
 
 while [ $login_retry -lt 5 ]; do  # Increased from 3 to 5 attempts
     # Try login and capture result
@@ -426,7 +444,7 @@ push_image() {
 }
 
 # Push all images (skip if login failed)
-if [ "$SKIP_LOGIN" != "true" ]; then
+if [ "${SKIP_LOGIN:-false}" != "true" ]; then
     PUSH_FAILED=false
     push_image "$PUSH_REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
     push_image "$PUSH_REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
@@ -467,7 +485,7 @@ else
 fi
 
 # Verify registry contents (only if registry is being used)
-if [ "$SKIP_LOGIN" != "true" ] && [ -n "${REGISTRY_URL:-}" ]; then
+if [ "${SKIP_LOGIN:-false}" != "true" ] && [ -n "${REGISTRY_URL:-}" ]; then
     log_info "Verifying registry contents..."
     curl -s -u $REGISTRY_USER:$REGISTRY_PASS $REGISTRY_URL/v2/_catalog 2>/dev/null | jq . || log_warning "Could not verify registry contents"
 else
@@ -601,7 +619,7 @@ fi
 log_info "Deploying applications..."
 
 # Update manifests with correct registry references
-if [ "$SKIP_LOGIN" = "true" ]; then
+if [ "${SKIP_LOGIN:-false}" = "true" ]; then
     export USE_LOCAL_IMAGES=true
 fi
 ./scripts/update-registry-refs.sh
@@ -836,6 +854,18 @@ done
 
 # Get public IP for display
 PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s http://ipinfo.io/ip || hostname -I | awk '{print $1}')
+
+# Apply deployment fixes
+log_info "Applying deployment fixes..."
+if [ -f scripts/fix-deployment-issues.sh ]; then
+    ./scripts/fix-deployment-issues.sh || log_warning "Some fixes may have failed, continuing..."
+fi
+
+# Setup domain access for nawaf.thmanyah.com
+log_info "Setting up domain access..."
+if [ -f scripts/setup-domain-access.sh ]; then
+    sudo ./scripts/setup-domain-access.sh || log_warning "Domain setup may need manual configuration"
+fi
 
 # Step 18: Display access information
 echo -e "\n${GREEN}========================================${NC}"

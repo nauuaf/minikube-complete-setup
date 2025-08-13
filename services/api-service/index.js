@@ -224,6 +224,81 @@ app.get('/metrics', (req, res) => {
     register.metrics().then(metrics => res.send(metrics));
 });
 
+// In-memory storage for demo items
+let items = [
+    { id: 1, name: 'Sample Item 1', description: 'Demo item from API service', createdAt: new Date().toISOString() },
+    { id: 2, name: 'Sample Item 2', description: 'Another demo item from API service', createdAt: new Date().toISOString() }
+];
+let nextId = 3;
+
+// Items API endpoints (for frontend compatibility)
+app.get('/items', (req, res) => {
+    res.json(items);
+});
+
+app.post('/items', (req, res) => {
+    const { name, description } = req.body;
+    if (!name || !description) {
+        return res.status(400).json({ error: 'Name and description are required' });
+    }
+    
+    const newItem = {
+        id: nextId++,
+        name,
+        description,
+        createdAt: new Date().toISOString()
+    };
+    
+    items.push(newItem);
+    res.status(201).json(newItem);
+});
+
+app.get('/items/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const item = items.find(i => i.id === id);
+    
+    if (!item) {
+        return res.status(404).json({ error: 'Item not found' });
+    }
+    
+    res.json(item);
+});
+
+app.put('/items/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const itemIndex = items.findIndex(i => i.id === id);
+    
+    if (itemIndex === -1) {
+        return res.status(404).json({ error: 'Item not found' });
+    }
+    
+    const { name, description } = req.body;
+    if (!name || !description) {
+        return res.status(400).json({ error: 'Name and description are required' });
+    }
+    
+    items[itemIndex] = {
+        ...items[itemIndex],
+        name,
+        description,
+        updatedAt: new Date().toISOString()
+    };
+    
+    res.json(items[itemIndex]);
+});
+
+app.delete('/items/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const itemIndex = items.findIndex(i => i.id === id);
+    
+    if (itemIndex === -1) {
+        return res.status(404).json({ error: 'Item not found' });
+    }
+    
+    items.splice(itemIndex, 1);
+    res.status(204).send();
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({
@@ -238,6 +313,7 @@ app.get('/', (req, res) => {
             '/database-status',
             '/storage-status',
             '/api/process',
+            '/items',
             '/metrics'
         ]
     });
