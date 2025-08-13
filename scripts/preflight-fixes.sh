@@ -250,12 +250,11 @@ fi
 
 # 11. Pre-create ConfigMaps to avoid race conditions
 log_info "Preparing for ConfigMap creation..."
-# This will be done during main deployment, just ensure kubectl works
+# This will be done during main deployment, just check if kubectl is available
 if command -v kubectl &> /dev/null; then
     log_success "kubectl is available"
 else
-    log_error "kubectl not found - please install kubectl before proceeding"
-    exit 1
+    log_info "kubectl not found - will be installed by main setup script"
 fi
 
 # 12. Set up environment variables if config doesn't exist
