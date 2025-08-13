@@ -11,24 +11,49 @@ NC='\033[0m'
 
 echo -e "${BLUE}🏥 Running Comprehensive Health Checks...${NC}"
 
-# First check if pods are actually running
+# First check if pods are actually running and ready
 echo -e "\n${YELLOW}📋 Pod Status Check:${NC}"
-echo "Checking if pods are running..."
+echo "Checking pod readiness (not just phase)..."
+
+# Use a more robust check that properly parses ready/total containers
+failed_pods=0
+total_pods=0
+
 kubectl get pods -n production --no-headers | while read line; do
     pod_name=$(echo $line | awk '{print $1}')
     pod_status=$(echo $line | awk '{print $3}')
-    ready=$(echo $line | awk '{print $2}')
+    ready_status=$(echo $line | awk '{print $2}')
     
-    if [[ "$pod_status" == "Running" ]]; then
-        echo -e "  $pod_name: ${GREEN}✅ $pod_status ($ready ready)${NC}"
+    # Parse ready containers (e.g., "1/1", "0/2")
+    ready_count=$(echo $ready_status | cut -d'/' -f1)
+    total_count=$(echo $ready_status | cut -d'/' -f2)
+    
+    ((total_pods++))
+    
+    if [[ "$pod_status" == "Running" ]] && [[ "$ready_count" == "$total_count" ]] && [[ "$ready_count" -gt 0 ]]; then
+        echo -e "  $pod_name: ${GREEN}✅ Ready ($ready_status containers)${NC}"
+    elif [[ "$pod_status" == "Running" ]]; then
+        echo -e "  $pod_name: ${YELLOW}⚠️  Running but not ready ($ready_status containers)${NC}"
+        ((failed_pods++))
+        
+        # Show container status details
+        echo "    Container status:"
+        kubectl get pod $pod_name -n production -o jsonpath='{range .status.containerStatuses[*]}{.name}: {.ready}{"\n"}{end}' | sed 's/^/      /'
     else
-        echo -e "  $pod_name: ${RED}❌ $pod_status ($ready ready)${NC}"
+        echo -e "  $pod_name: ${RED}❌ $pod_status ($ready_status containers)${NC}"
+        ((failed_pods++))
         
         # Show more details for failed pods
-        echo "    Debugging $pod_name:"
-        kubectl describe pod $pod_name -n production | grep -A5 -B5 "Events\|State\|Ready" || true
+        echo "    Recent events:"
+        kubectl get events --field-selector involvedObject.name=$pod_name -n production --sort-by='.lastTimestamp' | tail -3 | sed 's/^/      /' || true
     fi
 done
+
+if [ $failed_pods -gt 0 ]; then
+    echo -e "\n${RED}⚠️  $failed_pods out of $total_pods pods are not ready${NC}"
+else
+    echo -e "\n${GREEN}✅ All $total_pods pods are running and ready${NC}"
+fi
 
 # Function to test service with proper port forwarding
 test_service_health() {
@@ -46,15 +71,22 @@ test_service_health() {
         return 1
     fi
     
-    # Check if pods are running
-    local running_pods=$(kubectl get pods -n $namespace -l app=$service --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$running_pods" -eq 0 ]; then
-        echo -e "  ${RED}❌ No running pods found for $service${NC}"
-        kubectl get pods -n $namespace -l app=$service
+    # Check if pods are running AND ready (not just running)
+    local ready_pods=$(kubectl get pods -n $namespace -l app=$service -o jsonpath='{range .items[*]}{.status.phase},{.metadata.name},{range .status.containerStatuses[*]}{.ready},{end}{"\n"}{end}' 2>/dev/null | grep "^Running," | grep -c "true," | tr -d ' ')
+    local total_pods=$(kubectl get pods -n $namespace -l app=$service --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    
+    if [ "$total_pods" -eq 0 ]; then
+        echo -e "  ${RED}❌ No pods found for $service${NC}"
+        return 1
+    elif [ "$ready_pods" -eq 0 ]; then
+        echo -e "  ${RED}❌ No ready pods found for $service (found $total_pods total pods)${NC}"
+        kubectl get pods -n $namespace -l app=$service -o wide
+        echo "    Pod readiness details:"
+        kubectl get pods -n $namespace -l app=$service -o jsonpath='{range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}{.name}={.ready} {end}{"\n"}{end}' | sed 's/^/      /'
         return 1
     fi
     
-    echo "  📍 Found $running_pods running pod(s) for $service"
+    echo "  📍 Found $ready_pods ready pod(s) for $service (out of $total_pods total)"
     
     # Always use port-forward for reliable access
     kubectl port-forward --address=127.0.0.1 svc/$service $local_port:$service_port -n $namespace > /dev/null 2>&1 &

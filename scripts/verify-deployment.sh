@@ -68,36 +68,52 @@ else
     kill $PF_PID 2>/dev/null || true
 fi
 
-# 4. Check application pods
+# 4. Check application pods (ready, not just running)
 echo -e "\n${YELLOW}🔍 4. Application Pods Check${NC}"
 services=("api-service" "auth-service" "image-service" "frontend")
 
 for service in "${services[@]}"; do
-    running_pods=$(kubectl get pods -n production -l app=$service --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$running_pods" -gt 0 ]; then
-        check_status "$service pods running ($running_pods)" 0
+    # Check for ready pods, not just running
+    ready_pods=$(kubectl get pods -n production -l app=$service -o jsonpath='{range .items[*]}{.status.phase},{range .status.containerStatuses[*]}{.ready},{end}{"\n"}{end}' 2>/dev/null | grep "^Running," | grep -c "true," | tr -d ' ')
+    total_pods=$(kubectl get pods -n production -l app=$service --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    
+    if [ "$ready_pods" -gt 0 ] && [ "$ready_pods" -eq "$total_pods" ]; then
+        check_status "$service pods ready ($ready_pods/$total_pods)" 0
+    elif [ "$total_pods" -gt 0 ]; then
+        check_status "$service pods ready ($ready_pods/$total_pods)" 1
     else
-        check_status "$service pods running" 1
+        check_status "$service pods found" 1
     fi
 done
 
-# 5. Check monitoring pods
+# 5. Check monitoring pods (ready, not just running)
 echo -e "\n${YELLOW}🔍 5. Monitoring Pods Check${NC}"
 monitoring_services=("prometheus" "grafana" "alertmanager")
 
 for service in "${monitoring_services[@]}"; do
-    running_pods=$(kubectl get pods -n monitoring -l app=$service --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$running_pods" -gt 0 ]; then
-        check_status "$service pods running ($running_pods)" 0
+    # Check for ready pods, not just running
+    ready_pods=$(kubectl get pods -n monitoring -l app=$service -o jsonpath='{range .items[*]}{.status.phase},{range .status.containerStatuses[*]}{.ready},{end}{"\n"}{end}' 2>/dev/null | grep "^Running," | grep -c "true," | tr -d ' ')
+    total_pods=$(kubectl get pods -n monitoring -l app=$service --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    
+    if [ "$ready_pods" -gt 0 ] && [ "$ready_pods" -eq "$total_pods" ]; then
+        check_status "$service pods ready ($ready_pods/$total_pods)" 0
+    elif [ "$total_pods" -gt 0 ]; then
+        check_status "$service pods ready ($ready_pods/$total_pods)" 1
     else
-        check_status "$service pods running" 1
+        check_status "$service pods found" 1
     fi
 done
 
 # 6. Check ingress controller
 echo -e "\n${YELLOW}🔍 6. Ingress Controller Check${NC}"
-kubectl get pods -n ingress-nginx | grep -q "Running.*1/1"
-check_status "Ingress controller ready" $?
+ready_ingress=$(kubectl get pods -n ingress-nginx -o jsonpath='{range .items[*]}{.status.phase},{range .status.containerStatuses[*]}{.ready},{end}{"\n"}{end}' 2>/dev/null | grep "^Running," | grep -c "true," | tr -d ' ')
+total_ingress=$(kubectl get pods -n ingress-nginx --no-headers 2>/dev/null | wc -l | tr -d ' ')
+
+if [ "$ready_ingress" -gt 0 ] && [ "$ready_ingress" -eq "$total_ingress" ]; then
+    check_status "Ingress controller ready ($ready_ingress/$total_ingress)" 0
+else
+    check_status "Ingress controller ready ($ready_ingress/$total_ingress)" 1
+fi
 
 # 7. Check port forwards
 echo -e "\n${YELLOW}🔍 7. Port Forwarding Check${NC}"

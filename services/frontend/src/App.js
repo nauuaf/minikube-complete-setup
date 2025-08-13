@@ -14,11 +14,11 @@ const { Content } = Layout;
 
 function App() {
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout className="cyber-layout" style={{ minHeight: '100vh' }}>
       <Sidebar />
       <Layout>
         <Header />
-        <Content style={{ margin: '24px 16px', padding: 24, background: '#fff' }}>
+        <Content className="cyber-layout .ant-layout-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/api-service" element={<ApiService />} />

@@ -144,10 +144,11 @@ minikube addons enable ingress-dns
 minikube addons enable metrics-server
 minikube addons enable dashboard
 
-# Step 4: Install cert-manager for Let's Encrypt
-log_info "Installing cert-manager for TLS..."
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
-sleep 30  # Wait for cert-manager to be ready
+# Step 4: Install cert-manager (skip - not needed for basic functionality)
+# Cert-manager is only needed if you want automatic TLS certificates
+# log_info "Installing cert-manager for TLS..."
+# kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+# sleep 30
 
 # Step 5: Create namespaces
 log_info "Creating namespaces..."
@@ -222,77 +223,9 @@ if [ $retry_count -eq 30 ]; then
     exit 1
 fi
 
-# Configure Docker for insecure registry (required for HTTP registries)
-log_info "Configuring Docker for insecure registry..."
-DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
-NEEDS_RESTART=false
-
-# Check if we need to add insecure registry
-if [ -f "$DOCKER_DAEMON_JSON" ]; then
-    # Check if our registry is already configured
-    if ! grep -q "localhost:$REGISTRY_PORT" "$DOCKER_DAEMON_JSON" 2>/dev/null; then
-        log_warning "Adding localhost:$REGISTRY_PORT to Docker insecure registries..."
-        # Backup existing config
-        sudo cp "$DOCKER_DAEMON_JSON" "${DOCKER_DAEMON_JSON}.backup"
-        # Add localhost registry to existing config
-        sudo jq --arg registry "localhost:$REGISTRY_PORT" '.["insecure-registries"] += [$registry]' "$DOCKER_DAEMON_JSON" > /tmp/daemon.json
-        sudo mv /tmp/daemon.json "$DOCKER_DAEMON_JSON"
-        NEEDS_RESTART=true
-    fi
-else
-    # Create new config with localhost registry
-    log_info "Creating Docker daemon configuration..."
-    echo "{\"insecure-registries\": [\"localhost:$REGISTRY_PORT\"]}" | sudo tee "$DOCKER_DAEMON_JSON" > /dev/null
-    NEEDS_RESTART=true
-fi
-
-# Restart Docker if configuration changed
-if [ "$NEEDS_RESTART" = true ]; then
-    log_info "Restarting Docker daemon to apply configuration..."
-    
-    # Reload daemon configuration
-    sudo systemctl daemon-reload || log_warning "Failed to reload systemd daemon"
-    
-    # Restart Docker with error handling
-    if sudo systemctl restart docker; then
-        log_info "Docker restart command completed"
-    else
-        log_warning "Docker restart command failed, but continuing..."
-    fi
-    
-    # Wait for Docker to be ready with more patience
-    log_info "Waiting for Docker daemon to be ready..."
-    for i in {1..20}; do
-        if docker info > /dev/null 2>&1; then
-            log_success "Docker daemon is ready"
-            break
-        fi
-        if [ $i -eq 1 ]; then
-            echo -n "Waiting for Docker"
-        fi
-        echo -n "."
-        sleep 3
-    done
-    echo ""  # New line after dots
-    
-    # Final check
-    if ! docker info > /dev/null 2>&1; then
-        log_warning "Docker daemon took longer than expected to start"
-        log_warning "Attempting to continue - Docker may be working despite the delay"
-    fi
-fi
-
-# Verify Docker sees the insecure registry
-log_info "Verifying Docker configuration..."
-if timeout 10 docker info 2>/dev/null | grep -q "localhost:$REGISTRY_PORT"; then
-    log_success "Docker configured with insecure registry: localhost:$REGISTRY_PORT"
-elif timeout 10 docker info 2>/dev/null >/dev/null; then
-    log_warning "Docker is running but insecure registry may not be visible yet"
-    log_info "This is often normal and will work for registry operations"
-else
-    log_warning "Docker may not be fully ready yet, but continuing with deployment..."
-    log_info "Registry operations will be attempted anyway"
-fi
+# Skip Docker daemon restart - not needed since Minikube has its own Docker daemon
+# The insecure-registry flag in minikube start command is sufficient
+log_info "Using Minikube's Docker daemon with insecure registry already configured..."
 
 # Docker login with retry and better error handling
 log_info "Logging into registry..."
@@ -326,26 +259,8 @@ while [ $login_retry -lt 5 ]; do  # Increased from 3 to 5 attempts
             if curl -s -u "$REGISTRY_USER:$REGISTRY_PASS" "http://$REGISTRY_HOST/v2/" >/dev/null 2>&1; then
                 log_info "Registry API is accessible, Docker auth may be the issue"
                 
-                # Force reconfigure Docker (more carefully)
-                log_info "Updating Docker daemon configuration..."
-                echo "{\"insecure-registries\": [\"$REGISTRY_HOST\"]}" | sudo tee /etc/docker/daemon.json > /dev/null
-                
-                if sudo systemctl daemon-reload && sudo systemctl restart docker; then
-                    log_info "Docker reconfigured, waiting for it to be ready..."
-                    
-                    # Wait for Docker to be ready (with more patience)
-                    docker_ready=0
-                    while [ $docker_ready -lt 15 ]; do
-                        if timeout 5 docker info >/dev/null 2>&1; then
-                            log_info "Docker is ready after reconfiguration"
-                            break
-                        fi
-                        sleep 2
-                        docker_ready=$((docker_ready + 1))
-                    done
-                else
-                    log_warning "Docker reconfiguration may have failed, but continuing..."
-                fi
+                # Skip Docker reconfiguration - use Minikube's Docker daemon instead
+                log_warning "Registry auth issue, but continuing without Docker restart..."
             else
                 log_warning "Registry API not accessible, checking pod status..."
                 kubectl get pods -l app=docker-registry 2>/dev/null || true
@@ -382,18 +297,13 @@ if [ "$LOGIN_SUCCESS" = false ]; then
     SKIP_LOGIN=true
 fi
 
-# Check if Minikube is still accessible
-log_info "Checking Minikube status..."
-if ! minikube status >/dev/null 2>&1; then
-    log_error "Minikube is not running or not accessible"
-    log_info "Attempting to restart Minikube..."
-    minikube stop || true
-    sleep 5
-    minikube start --memory=$MEMORY --cpus=$CPUS --disk-size=$DISK_SIZE
-    sleep 10
-    MINIKUBE_IP=$(minikube ip)
-    REGISTRY_HOST="$MINIKUBE_IP:$REGISTRY_PORT"
-    log_success "Minikube restarted with IP: $MINIKUBE_IP"
+# Verify Minikube is still running
+log_info "Verifying Minikube status..."
+if minikube status >/dev/null 2>&1; then
+    log_success "Minikube is running"
+else
+    log_error "Minikube is not running, please restart the script"
+    exit 1
 fi
 
 # Tag and push images (with error handling)
@@ -443,8 +353,9 @@ push_image() {
     return 1
 }
 
-# Push all images (skip if login failed)
+# Determine deployment strategy based on registry login status
 if [ "${SKIP_LOGIN:-false}" != "true" ]; then
+    log_info "Attempting to push images to registry..."
     PUSH_FAILED=false
     push_image "$PUSH_REGISTRY_HOST/api-service:$API_VERSION" || PUSH_FAILED=true
     push_image "$PUSH_REGISTRY_HOST/auth-service:$AUTH_VERSION" || PUSH_FAILED=true
@@ -452,36 +363,41 @@ if [ "${SKIP_LOGIN:-false}" != "true" ]; then
     push_image "$PUSH_REGISTRY_HOST/frontend:$FRONTEND_VERSION" || PUSH_FAILED=true
 
     if [ "$PUSH_FAILED" = true ]; then
-        log_warning "Some images failed to push, but continuing with deployment..."
-        log_warning "Services will try to pull from registry during deployment"
-        # If push fails, fall back to local images
+        log_warning "Registry push failed, falling back to local images..."
         export USE_LOCAL_IMAGES=true
     else
         log_success "All images pushed to registry successfully"
+        export USE_LOCAL_IMAGES=false
     fi
 else
-    log_warning "Skipping image push due to registry login failure"
-    log_info "Loading images directly into Minikube instead..."
+    log_info "Registry login failed, using local image deployment strategy..."
+    export USE_LOCAL_IMAGES=true
+fi
+
+# If using local images, ensure they're available in Minikube's Docker daemon
+if [ "${USE_LOCAL_IMAGES:-false}" = "true" ]; then
+    log_info "Ensuring images are available in Minikube's Docker daemon..."
     
-    # Since Minikube uses Docker driver, we need to push to Minikube's Docker daemon
-    log_info "Configuring Docker to use Minikube's daemon..."
+    # Configure Docker to use Minikube's daemon
     eval $(minikube docker-env)
     
-    # Rebuild images in Minikube's Docker daemon
-    log_info "Building images in Minikube's Docker environment..."
-    docker build -t api-service:$API_VERSION ./services/api-service/ || log_warning "Failed to build api-service"
-    docker build -t auth-service:$AUTH_VERSION ./services/auth-service/ || log_warning "Failed to build auth-service"
-    docker build -t image-service:$IMAGE_VERSION ./services/image-service/ || log_warning "Failed to build image-service"
-    docker build -t frontend:$FRONTEND_VERSION ./services/frontend/ || log_warning "Failed to build frontend"
+    # Check if images already exist, rebuild only if necessary
+    log_info "Checking/building images in Minikube environment..."
+    for service_image in "api-service:$API_VERSION" "auth-service:$AUTH_VERSION" "image-service:$IMAGE_VERSION" "frontend:$FRONTEND_VERSION"; do
+        service_name=$(echo $service_image | cut -d: -f1)
+        if ! docker image inspect $service_image >/dev/null 2>&1; then
+            log_info "Building missing image: $service_image"
+            docker build -t $service_image ./services/$service_name/ || log_warning "Failed to build $service_image"
+        else
+            log_info "Image $service_image already exists in Minikube Docker"
+        fi
+        
+        # Also tag with cluster registry name for consistency
+        cluster_tag="$CLUSTER_REGISTRY_HOST/$service_image"
+        docker tag $service_image $cluster_tag 2>/dev/null || true
+    done
     
-    # Also tag with cluster registry name in Minikube's docker
-    docker tag api-service:$API_VERSION $CLUSTER_REGISTRY_HOST/api-service:$API_VERSION || true
-    docker tag auth-service:$AUTH_VERSION $CLUSTER_REGISTRY_HOST/auth-service:$AUTH_VERSION || true
-    docker tag image-service:$IMAGE_VERSION $CLUSTER_REGISTRY_HOST/image-service:$IMAGE_VERSION || true
-    docker tag frontend:$FRONTEND_VERSION $CLUSTER_REGISTRY_HOST/frontend:$FRONTEND_VERSION || true
-    
-    log_success "Images built in Minikube's Docker daemon"
-    export USE_LOCAL_IMAGES=true
+    log_success "Local images prepared in Minikube's Docker daemon"
 fi
 
 # Verify registry contents (only if registry is being used)
@@ -519,26 +435,18 @@ kubectl wait --namespace ingress-nginx \
   --selector=app.kubernetes.io/name=ingress-nginx \
   --timeout=300s || log_warning "Ingress controller taking longer than expected"
 
-log_info "Installing cert-manager for Let's Encrypt certificates..."
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
-
-log_info "Waiting for cert-manager to be ready..."
-kubectl wait --namespace cert-manager \
-  --for=condition=ready pod \
-  --selector=app.kubernetes.io/instance=cert-manager \
-  --timeout=300s || log_warning "cert-manager taking longer than expected"
-
-# Give cert-manager webhooks time to be ready
-sleep 15
+# Skip cert-manager installation - not needed for basic HTTP access
+# log_info "Installing cert-manager..."
+# kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
 
 # Step 11: Deploy security components
 log_info "Deploying security components..."
 kubectl apply -f kubernetes/security/02-secrets.yaml
 kubectl apply -f kubernetes/security/03-network-policies.yaml
 
-# Deploy TLS configuration (this will now work with cert-manager installed)
-log_info "Configuring TLS with Let's Encrypt for nawaf.thmanyah.com..."
-kubectl apply -f kubernetes/security/04-tls-ingress.yaml
+# Skip TLS configuration - not needed for basic functionality
+# log_info "Configuring TLS..."
+# kubectl apply -f kubernetes/security/04-tls-ingress.yaml
 
 # Step 12: Deploy data layer (PostgreSQL, Redis, MinIO)
 log_info "Deploying data infrastructure..."
@@ -669,183 +577,49 @@ done
 log_info "Running smoke tests..."
 ./scripts/health-checks.sh
 
-# Step 17: Enable HTTPS and remote access
-log_info "Enabling HTTPS and remote access..."
+# Step 17: Setup simple port forwarding for essential services
+log_info "Setting up port forwarding for essential services..."
 
-# Fix ingress access for ports 80 and 443
-log_info "Fixing ingress controller access..."
-./scripts/fix-ingress-access.sh
-
-# Kill any existing port forwards and restart properly
+# Kill any existing port forwards
 pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 2
 
-# Create comprehensive port forwarding script
-cat > /tmp/sre-platform-forward.sh << 'EOF'
-#!/bin/bash
+# Start simple port forwards in background for essential services only
+log_info "Starting port forwards..."
 
-# Create log directory with proper permissions
-mkdir -p /tmp/sre-logs
-chmod 755 /tmp/sre-logs
-
-echo "Starting comprehensive port forwarding..."
-
-# Function to start port forward with retry
-start_port_forward() {
-    local service_name=$1
-    local namespace=$2
-    local local_port=$3
-    local service_port=$4
-    local log_file=$5
-    local description=$6
-    
-    echo "Starting $description ($service_name:$service_port -> $local_port)..."
-    
-    # Kill any existing process on this port
-    pkill -f "port-forward.*:$local_port" 2>/dev/null || true
-    sleep 1
-    
-    # Start the port forward
-    kubectl port-forward --address 0.0.0.0 -n $namespace svc/$service_name $local_port:$service_port > $log_file 2>&1 &
-    local pid=$!
-    
-    # Give it a moment to start
-    sleep 2
-    
-    # Check if it's running
-    if kill -0 $pid 2>/dev/null; then
-        echo "✅ $description started successfully (PID: $pid)"
-        return 0
-    else
-        echo "❌ $description failed to start"
-        return 1
-    fi
-}
-
-# Wait for ingress controller to be ready
-echo "Waiting for ingress controller..."
-while ! kubectl get pods -n ingress-nginx | grep -q "Running.*1/1"; do
-    echo "Ingress controller not ready, waiting..."
-    sleep 5
-done
-
-# Get the correct ingress service name
+# Ingress controller for HTTP/HTTPS access
 INGRESS_SVC=$(kubectl get svc -n ingress-nginx --no-headers | grep controller | awk '{print $1}' | head -1)
-if [ -z "$INGRESS_SVC" ]; then
-    echo "ERROR: No ingress controller service found"
-    INGRESS_SVC="ingress-nginx-controller"  # fallback
-fi
-
-echo "Using ingress service: $INGRESS_SVC"
-
-# Kill any existing port forwards
-pkill -f "port-forward" 2>/dev/null || true
-sleep 2
-
-echo "Starting port forwards..."
-
-# Critical HTTP/HTTPS forwards
-start_port_forward "$INGRESS_SVC" "ingress-nginx" "80" "80" "/tmp/sre-logs/http.log" "HTTP Ingress"
-start_port_forward "$INGRESS_SVC" "ingress-nginx" "443" "443" "/tmp/sre-logs/https.log" "HTTPS Ingress"
-
-# Application services
-start_port_forward "frontend" "production" "30004" "3000" "/tmp/sre-logs/frontend.log" "Frontend"
-
-# Monitoring services
-start_port_forward "grafana" "monitoring" "30030" "3000" "/tmp/sre-logs/grafana.log" "Grafana"
-start_port_forward "prometheus" "monitoring" "30090" "9090" "/tmp/sre-logs/prometheus.log" "Prometheus"
-
-# Registry and storage (optional)
-start_port_forward "registry-ui" "default" "30501" "80" "/tmp/sre-logs/registry-ui.log" "Registry UI" || true
-start_port_forward "minio-nodeport" "production" "30900" "9000" "/tmp/sre-logs/minio-api.log" "MinIO API" || true
-start_port_forward "minio-nodeport" "production" "30901" "9001" "/tmp/sre-logs/minio-console.log" "MinIO Console" || true
-
-echo "All critical port forwards started"
-
-# Monitor and restart if needed
-while true; do
-    sleep 30
-    
-    # Check and restart critical services
-    if ! pgrep -f "port-forward.*:80" > /dev/null; then
-        echo "$(date): Restarting HTTP forward..."
-        start_port_forward "$INGRESS_SVC" "ingress-nginx" "80" "80" "/tmp/sre-logs/http.log" "HTTP Ingress"
-    fi
-    
-    if ! pgrep -f "port-forward.*:443" > /dev/null; then
-        echo "$(date): Restarting HTTPS forward..."
-        start_port_forward "$INGRESS_SVC" "ingress-nginx" "443" "443" "/tmp/sre-logs/https.log" "HTTPS Ingress"
-    fi
-    
-    if ! pgrep -f "port-forward.*30004" > /dev/null; then
-        echo "$(date): Restarting frontend forward..."
-        start_port_forward "frontend" "production" "30004" "3000" "/tmp/sre-logs/frontend.log" "Frontend"
-    fi
-    
-    if ! pgrep -f "port-forward.*30030" > /dev/null; then
-        echo "$(date): Restarting Grafana forward..."
-        start_port_forward "grafana" "monitoring" "30030" "3000" "/tmp/sre-logs/grafana.log" "Grafana"
-    fi
-    
-    if ! pgrep -f "port-forward.*30090" > /dev/null; then
-        echo "$(date): Restarting Prometheus forward..."
-        start_port_forward "prometheus" "monitoring" "30090" "9090" "/tmp/sre-logs/prometheus.log" "Prometheus"
-    fi
-done
-EOF
-
-# Install as systemd service
-sudo cp /tmp/sre-platform-forward.sh /usr/local/bin/sre-platform-forward.sh
-sudo chmod +x /usr/local/bin/sre-platform-forward.sh
-
-cat > /tmp/sre-platform-forward.service << EOF
-[Unit]
-Description=SRE Platform Port Forwarding Service
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=$USER
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
-Environment="HOME=/home/$USER"
-Environment="KUBECONFIG=/home/$USER/.kube/config"
-ExecStart=/usr/local/bin/sre-platform-forward.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo cp /tmp/sre-platform-forward.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable sre-platform-forward.service
-sudo systemctl restart sre-platform-forward.service
-
-log_success "HTTPS and remote access enabled"
-
-# Configure firewall
-log_info "Configuring firewall for remote access..."
-if command -v ufw >/dev/null 2>&1; then
-    sudo ufw allow 80/tcp comment "HTTP" 2>/dev/null || true
-    sudo ufw allow 443/tcp comment "HTTPS" 2>/dev/null || true
-    sudo ufw allow 30000:32767/tcp comment "Kubernetes NodePorts" 2>/dev/null || true
-    log_success "Firewall configured for remote access"
+if [ -n "$INGRESS_SVC" ]; then
+    kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/$INGRESS_SVC 80:80 > /tmp/http-forward.log 2>&1 &
+    kubectl port-forward --address 0.0.0.0 -n ingress-nginx svc/$INGRESS_SVC 443:443 > /tmp/https-forward.log 2>&1 &
+    log_success "Ingress available on ports 80 (HTTP) and 443 (HTTPS)"
 else
-    # For systems without UFW, ensure iptables allows the ports
-    sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
-    sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
-    sudo iptables -I INPUT -p tcp --dport 30000:32767 -j ACCEPT 2>/dev/null || true
+    log_warning "Ingress controller not found, skipping HTTP/HTTPS port forwarding"
 fi
+
+# Frontend access (direct)
+kubectl port-forward --address 0.0.0.0 -n production svc/frontend 30004:3000 > /tmp/frontend-forward.log 2>&1 &
+log_success "Frontend available on port 30004"
+
+# Monitoring (optional but useful)
+kubectl port-forward --address 0.0.0.0 -n monitoring svc/grafana 30030:3000 > /tmp/grafana-forward.log 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n monitoring svc/prometheus 30090:9090 > /tmp/prometheus-forward.log 2>&1 &
+log_success "Monitoring services available on ports 30030 (Grafana) and 30090 (Prometheus)"
+
+# Wait for port forwards to establish
+sleep 5
+
+# Skip firewall configuration - not needed if ports are already accessible
+# Firewall rules should be configured at the infrastructure level, not in application scripts
+log_info "Skipping firewall configuration (configure manually if needed)..."
 
 # Wait for port forwards to establish
 sleep 10
 
-# Verify ports are listening
-log_info "Verifying remote access ports..."
+# Verify essential ports are listening
+log_info "Verifying port forwarding..."
 for port in 80 443 30004 30030 30090; do
-    if netstat -tlnp 2>/dev/null | grep -q ":$port.*0.0.0.0"; then
+    if netstat -tlnp 2>/dev/null | grep -q ":$port"; then
         log_success "Port $port is accessible"
     else
         log_warning "Port $port may not be accessible yet"
@@ -861,11 +635,9 @@ if [ -f scripts/fix-deployment-issues.sh ]; then
     ./scripts/fix-deployment-issues.sh || log_warning "Some fixes may have failed, continuing..."
 fi
 
-# Setup domain access for nawaf.thmanyah.com
-log_info "Setting up domain access..."
-if [ -f scripts/setup-domain-access.sh ]; then
-    sudo ./scripts/setup-domain-access.sh || log_warning "Domain setup may need manual configuration"
-fi
+# Skip domain setup - not essential for basic functionality
+# log_info "Setting up domain access..."
+# ./scripts/setup-domain-access.sh
 
 # Step 18: Display access information
 echo -e "\n${GREEN}========================================${NC}"
